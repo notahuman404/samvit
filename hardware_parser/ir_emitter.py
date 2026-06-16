@@ -6,10 +6,10 @@ Serializes the normalized, resolved AST to JSON IR.
 
 import json
 from typing import Dict, List, Any
-from ast_nodes import *
-from resolver import ResolvedAST
-from normalizer import Normalizer, normalize_val
-from diagnostics import Diagnostic, DiagList
+from .ast_nodes import *
+from .resolver import ResolvedAST
+from .normalizer import Normalizer, normalize_val
+from .diagnostics import Diagnostic, DiagList
 
 
 def loc_to_dict(loc: SourceLoc) -> Dict[str, Any]:

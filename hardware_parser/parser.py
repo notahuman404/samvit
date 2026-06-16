@@ -5,9 +5,9 @@ Implements recursive descent parser following the EBNF grammar in §3.
 """
 
 from typing import List, Optional, Union
-from lexer import Token, TokenKind, lex
-from ast_nodes import *
-from diagnostics import DiagList, Severity
+from .lexer import Token, TokenKind, lex
+from .ast_nodes import *
+from .diagnostics import DiagList, Severity
 
 
 class Parser:

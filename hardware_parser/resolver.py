@@ -5,7 +5,7 @@ Populates cross-references in the AST after validation.
 """
 
 from typing import Dict, Optional
-from ast_nodes import *
+from .ast_nodes import *
 
 
 class ResolvedAST:

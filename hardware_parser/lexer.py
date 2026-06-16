@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Iterator
 from enum import Enum
-from ast_nodes import SourceLoc, PinDirection
+from .ast_nodes import SourceLoc, PinDirection
 
 
 class TokenKind(Enum):
