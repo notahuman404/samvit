@@ -1,0 +1,21 @@
+# Samvit Hardware Design Pipeline — Python dependencies
+
+# Gemini API
+google-generativeai>=0.7.0
+
+# Web search / scraping (used by existing hardware_builder)
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# DB
+# sqlite3 is in Python stdlib — no extra package needed
+
+# Async
+# asyncio is in Python stdlib
+
+# Utility
+typing_extensions>=4.8.0
+
+# Optional: for richer progress display
+tqdm>=4.66.0
