@@ -45,4 +45,3 @@ Receives destination coordinates from the Jarvis voice engine → translates int
 
 ## Note
 Don't build the software layer, as soon as you complete the hardware input and output just save the files and then you will be called again when the software layer has been built. 
-

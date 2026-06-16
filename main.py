@@ -31,6 +31,8 @@ import json
 import os
 import sys
 import logging
+from dotenv import load_dotenv
+load_dotenv()
 
 # ── Ensure samvit/ is importable regardless of cwd ───────────────────────────
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -143,23 +145,24 @@ def parse_args() -> argparse.Namespace:
 
 def resolve_api_keys() -> list[str]:
     keys = []
-    for env in ("GEMINI_API_KEY_1", "GEMINI_API_KEY_2",
-                "GEMINI_API_KEY",   "GOOGLE_API_KEY"):
-        v = os.environ.get(env, "").strip()
-        if v and v not in keys:
-            keys.append(v)
-    if not keys:
-        print(
-            "ERROR: No Gemini API key found.\n"
-            "Set GEMINI_API_KEY_1 (and optionally GEMINI_API_KEY_2) "
-            "in your environment.\n"
-            "  export GEMINI_API_KEY_1=AIza...\n"
-            "  export GEMINI_API_KEY_2=AIza..."
-        )
-        sys.exit(1)
+    itr = 0
+    base = "GEMINI_API_KEY"
+    while True:
+        if itr == 0 :
+            key = os.getenv(base)
+            if key:
+                keys.append(key)
+            itr+=1
+            continue
+        
+        key = os.getenv(f"{base}_{itr}")
+        if key:
+            keys.append(key)
+            itr+=1
+        else: break
     return keys
 
-
+        
 async def _main() -> None:
     args = parse_args()
 
