@@ -5,12 +5,12 @@ Coordinates the compiler pipeline.
 """
 
 from typing import Dict, List, Tuple, Optional
-from parser import Parser
-from validator import Validator
-from resolver import resolve
-from normalizer import Normalizer
-from ir_emitter import emit_ir
-from diagnostics import DiagList, Diagnostic
+from .parser import Parser
+from .validator import Validator
+from .resolver import resolve
+from .normalizer import Normalizer
+from .ir_emitter import emit_ir
+from .diagnostics import DiagList, Diagnostic
 
 
 def compile_hwdl(

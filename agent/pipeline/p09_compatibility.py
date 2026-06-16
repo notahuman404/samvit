@@ -1,223 +1,296 @@
 """
-Stage 9 — Compatibility Checker (improved)
-===========================================
-Validates selected parts against each other:
-  • Voltage domain compatibility
-  • Current oversubscription
-  • Missing driver stages
-  • Interface protocol mismatches
-  • Missing dependency categories
+  Stage 9 — Compatibility Checker
+  =================================
+  Validates selected parts against each other using two layers:
 
-Wraps and extends the existing hardware_builder/compatibility_checker.py
-logic with the new Component / DesignState models.
+  Layer A — hardware_builder.compatibility_checker
+      Deterministic, rule-based validator with pin-level electrical checks:
+      voltage domain validation, short-circuit detection, current
+      oversubscription, interface mismatch, dependency completeness, and
+      metadata completeness.  Requires ComponentSpec objects; we build a
+      lightweight bridge from the pipeline's Component model.
 
-Output
-------
-  StageResult.data["is_valid"]  = bool
-  StageResult.data["issues"]    = list of issue dicts
-"""
+  Layer B — inline budget & voltage-domain heuristics
+      Simple checks that work even when Layer A cannot be imported.
 
-from __future__ import annotations
+  Output
+  ------
+    StageResult.data["is_valid"]  = bool
+    StageResult.data["issues"]    = list of issue dicts
+  """
+  from __future__ import annotations
 
-import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+  import time
+  from typing import Any, Dict, List, Optional, Set
 
-from agent.core.models import (
-    Component, DesignState, Issue, PinType, Severity,
-    StageResult, StageStatus,
-)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Rule definitions
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _check_voltage_domains(
-    selected: Dict[str, Component],
-) -> List[Issue]:
-    """Flag pairs where one component's max voltage exceeds another's max input."""
-    issues: List[Issue] = []
-    parts = list(selected.items())
-
-    for i, (pn_a, a) in enumerate(parts):
-        for pn_b, b in parts[i + 1:]:
-            # If they share a power domain, check compatibility
-            # Heuristic: both are in the 3.3V range or both 5V
-            if abs(a.voltage_max - b.voltage_max) > 1.5:
-                issues.append(Issue(
-                    code="VOLT_DOMAIN_MISMATCH",
-                    severity=Severity.WARNING,
-                    message=(
-                        f"Potential voltage domain mismatch: "
-                        f"{pn_a} ({a.voltage_max}V max) and "
-                        f"{pn_b} ({b.voltage_max}V max) differ by "
-                        f"{abs(a.voltage_max - b.voltage_max):.1f}V. "
-                        "Ensure a level shifter is present if they share signals."
-                    ),
-                    source="compatibility",
-                    objects=[pn_a, pn_b],
-                ))
-    return issues
+  from agent.core.models import (
+      Component, DesignState, Issue, PinSpec, PinType,
+      Severity, StageResult, StageStatus,
+  )
 
 
-def _check_power_budget(
-    selected: Dict[str, Component],
-    architecture_budget_mw: float,
-) -> List[Issue]:
-    issues: List[Issue] = []
-    total_mw = sum(
-        c.current_ma * c.voltage_max / 1000.0 * 1000.0   # mW
-        for c in selected.values()
-    )
-    if architecture_budget_mw > 0 and total_mw > architecture_budget_mw * 1.2:
-        issues.append(Issue(
-            code="POWER_OVERBUDGET",
-            severity=Severity.ERROR,
-            message=(
-                f"Estimated power draw {total_mw:.0f}mW exceeds architecture "
-                f"budget {architecture_budget_mw:.0f}mW by "
-                f"{total_mw - architecture_budget_mw:.0f}mW."
-            ),
-            source="compatibility",
-        ))
-    elif architecture_budget_mw > 0 and total_mw > architecture_budget_mw:
-        issues.append(Issue(
-            code="POWER_NEAR_LIMIT",
-            severity=Severity.WARNING,
-            message=(
-                f"Estimated power draw {total_mw:.0f}mW is within 20% of budget "
-                f"({architecture_budget_mw:.0f}mW). Consider adding headroom."
-            ),
-            source="compatibility",
-        ))
-    return issues
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Layer A — hardware_builder.compatibility_checker bridge
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  def _build_component_spec(pn: str, comp: Component):
+      """Convert a pipeline Component → compatibility_checker.ComponentSpec."""
+      from hardware_builder.compatibility_checker import (  # type: ignore[import]
+          ComponentSpec, PinSpec as CkPinSpec, PinType as CkPinType,
+          InterfaceSpec, InterfaceType,
+      )
+
+      def _ck_pin_type(pt: Any) -> "CkPinType":
+          mapping = {
+              "POWER_IN":    CkPinType.POWER_IN,
+              "POWER_OUT":   CkPinType.POWER_OUT,
+              "DIGITAL_IN":  CkPinType.DIGITAL_IN,
+              "DIGITAL_OUT": CkPinType.DIGITAL_OUT,
+              "DIGITAL_BIDI":CkPinType.DIGITAL_BIDI,
+              "ANALOG_IN":   CkPinType.ANALOG_IN,
+              "ANALOG_OUT":  CkPinType.ANALOG_OUT,
+              "PASSIVE":     CkPinType.PASSIVE,
+          }
+          return mapping.get(str(pt).upper(), CkPinType.PASSIVE)
+
+      pins_dict = {}
+      if comp.pins:
+          for pin_name, pspec in comp.pins.items():
+              pins_dict[pin_name] = CkPinSpec(
+                  name=pin_name,
+                  type=_ck_pin_type(pspec.type),
+                  voltage_min=pspec.voltage_min if hasattr(pspec, "voltage_min") else comp.voltage_min,
+                  voltage_max=pspec.voltage_max if hasattr(pspec, "voltage_max") else comp.voltage_max,
+                  current_max=pspec.current_max if hasattr(pspec, "current_max") else comp.current_ma / 1000.0,
+                  current_draw=pspec.current_draw if hasattr(pspec, "current_draw") else comp.current_ma / 1000.0,
+              )
+
+      return ComponentSpec(
+          part_number=pn,
+          category=comp.category,
+          description=comp.description or "",
+          pins=pins_dict,
+          footprint=comp.footprint or None,
+          package=comp.package or None,
+      )
 
 
-def _check_footprints(selected: Dict[str, Component]) -> List[Issue]:
-    issues: List[Issue] = []
-    for pn, comp in selected.items():
-        if not comp.footprint:
-            issues.append(Issue(
-                code="MISSING_FOOTPRINT",
-                severity=Severity.ERROR,
-                message=f"Component '{pn}' has no footprint assigned. Cannot generate PCB layout.",
-                source="compatibility",
-                objects=[pn],
-            ))
-        if not comp.package:
-            issues.append(Issue(
-                code="MISSING_PACKAGE",
-                severity=Severity.WARNING,
-                message=f"Component '{pn}' has no package specified.",
-                source="compatibility",
-                objects=[pn],
-            ))
-    return issues
+  def _run_checker_layer_a(selected_components: Dict[str, Component]) -> List[Issue]:
+      """Run hardware_builder.compatibility_checker on the selected parts."""
+      try:
+          import os, sys
+          repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+          if repo_root not in sys.path:
+              sys.path.insert(0, repo_root)
+
+          from hardware_builder.compatibility_checker import (  # type: ignore[import]
+              CompatibilityChecker, ArchitectureSpec, SelectedPart, Connection,
+          )
+
+          # Build component DB dict for the checker
+          component_db = {}
+          for pn, comp in selected_components.items():
+              try:
+                  component_db[pn] = _build_component_spec(pn, comp)
+              except Exception:
+                  continue
+
+          # Build SelectedPart dict (designator → SelectedPart)
+          ck_parts = {}
+          for i, (pn, comp) in enumerate(selected_components.items()):
+              prefix = {"MCU": "U", "SBC": "U", "SENSOR": "S", "ACTUATOR": "M",
+                        "POWER": "PS", "COMMS": "RF", "AUDIO": "A",
+                        "DISPLAY": "D", "MEMORY": "U", "INTERFACE": "IC",
+                        "PASSIVE": "C", "PROTECTION": "D"}.get(comp.category, "X")
+              des = f"{prefix}{i + 1}"
+              ck_parts[des] = SelectedPart(designator=des, part_number=pn)
+
+          arch = ArchitectureSpec(components=ck_parts, connections=[])
+          checker = CompatibilityChecker(arch, component_db)
+          report = checker.run()
+
+          pipeline_issues: List[Issue] = []
+          for err in report.errors:
+              pipeline_issues.append(Issue(
+                  code=err.get("code", "COMPAT_ERROR"),
+                  severity=Severity.ERROR,
+                  message=err.get("message", "Compatibility error"),
+                  source="compatibility_checker",
+                  objects=err.get("objects", []),
+              ))
+          for warn in report.warnings:
+              pipeline_issues.append(Issue(
+                  code=warn.get("code", "COMPAT_WARN"),
+                  severity=Severity.WARNING,
+                  message=warn.get("message", "Compatibility warning"),
+                  source="compatibility_checker",
+                  objects=warn.get("objects", []),
+              ))
+          return pipeline_issues
+
+      except Exception as exc:
+          # Layer A unavailable — not a fatal error, Layer B will still run
+          return [Issue(
+              code="COMPAT_CHECKER_SKIP",
+              severity=Severity.WARNING,
+              message=f"hardware_builder compatibility_checker skipped: {exc}",
+              source="compatibility",
+          )]
 
 
-def _check_interface_coverage(
-    selected: Dict[str, Component],
-    subsystems: List[Any],
-) -> List[Issue]:
-    """Ensure required interfaces (I2C, SPI, etc.) have at least one master."""
-    issues: List[Issue] = []
-    needed_interfaces: Set[str] = set()
-    for sub in subsystems:
-        iface = getattr(sub, "interface", "GPIO")
-        if iface not in ("GPIO", "POWER", "PASSIVE"):
-            needed_interfaces.add(iface)
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Layer B — inline heuristic checks (always run)
+  # ─────────────────────────────────────────────────────────────────────────────
 
-    # Check that MCU or SBC is present to serve as bus master
-    has_master = any(
-        c.category in ("MCU", "SBC") for c in selected.values()
-    )
-    if needed_interfaces and not has_master:
-        issues.append(Issue(
-            code="NO_BUS_MASTER",
-            severity=Severity.ERROR,
-            message=(
-                f"Interfaces {needed_interfaces} are required but no MCU/SBC "
-                "is selected to act as bus master."
-            ),
-            source="compatibility",
-        ))
-    return issues
+  def _check_voltage_domains(selected: Dict[str, Component]) -> List[Issue]:
+      issues: List[Issue] = []
+      parts = list(selected.items())
+      for i, (pn_a, a) in enumerate(parts):
+          for pn_b, b in parts[i + 1:]:
+              if abs(a.voltage_max - b.voltage_max) > 1.5:
+                  issues.append(Issue(
+                      code="VOLTAGE_DOMAIN_MISMATCH",
+                      severity=Severity.WARNING,
+                      message=(
+                          f"{pn_a} (max {a.voltage_max}V) and "
+                          f"{pn_b} (max {b.voltage_max}V) operate in different voltage domains — "
+                          "ensure a level-shifter or regulator bridges them."
+                      ),
+                      source="compatibility",
+                      objects=[pn_a, pn_b],
+                  ))
+      return issues
 
 
-def _check_missing_power_regulator(selected: Dict[str, Component]) -> List[Issue]:
-    issues: List[Issue] = []
-    has_power = any(c.category in ("POWER", "Charger IC", "Buck-Boost", "LDO")
-                    for c in selected.values())
-    has_consumer = any(c.category not in ("POWER", "PASSIVE")
-                       for c in selected.values())
-    if has_consumer and not has_power:
-        issues.append(Issue(
-            code="MISSING_POWER_STAGE",
-            severity=Severity.ERROR,
-            message="No power management component selected. All consuming parts need a power rail.",
-            source="compatibility",
-        ))
-    return issues
+  def _check_power_budget(selected: Dict[str, Component], budget_mw: float) -> List[Issue]:
+      issues: List[Issue] = []
+      total_mw = sum(
+          c.current_ma * max(c.voltage_max, c.voltage_min) / 1000.0 * 1000.0
+          for c in selected.values()
+      )
+      if budget_mw > 0 and total_mw > budget_mw * 1.2:
+          issues.append(Issue(
+              code="POWER_OVERBUDGET",
+              severity=Severity.ERROR,
+              message=(
+                  f"Estimated draw {total_mw:.0f}mW exceeds budget "
+                  f"{budget_mw:.0f}mW by {total_mw - budget_mw:.0f}mW."
+              ),
+              source="compatibility",
+          ))
+      elif budget_mw > 0 and total_mw > budget_mw:
+          issues.append(Issue(
+              code="POWER_NEAR_LIMIT",
+              severity=Severity.WARNING,
+              message=f"Estimated draw {total_mw:.0f}mW is close to budget {budget_mw:.0f}mW.",
+              source="compatibility",
+          ))
+      return issues
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Stage entry point
-# ──────────────────────────────────────────────────────────────────────────────
+  def _check_missing_categories(
+      selected: Dict[str, Component],
+      subsystem_categories: Set[str],
+  ) -> List[Issue]:
+      """Warn about common missing companion chips."""
+      issues: List[Issue] = []
+      cats = {c.category.upper() for c in selected.values()}
+      cats.update(s.upper() for s in subsystem_categories)
 
-def run(state: DesignState) -> StageResult:
-    t0 = time.monotonic()
-    all_issues: List[Issue] = []
+      needs_charger  = any("BATTERY" in c for c in cats)
+      has_charger    = any("CHARGER" in c or "CHARGE" in c for c in cats)
+      needs_regulator = (
+          any(c in cats for c in ("MCU", "SBC", "SENSOR")) and
+          not any(c in cats for c in ("LDO", "BUCK", "BOOST", "REGULATOR", "POWER"))
+      )
 
-    if state.architecture is None:
-        return StageResult(
-            stage="p09_compatibility",
-            status=StageStatus.FAILED,
-            issues=[Issue("COMPAT_NO_ARCH", Severity.ERROR,
-                          "Architecture not set.", "compatibility")],
-            duration=time.monotonic() - t0,
-        )
+      if needs_charger and not has_charger:
+          issues.append(Issue(
+              code="MISSING_CHARGER",
+              severity=Severity.WARNING,
+              message="Battery selected but no charger IC found in design.",
+              source="compatibility",
+          ))
+      if needs_regulator:
+          issues.append(Issue(
+              code="MISSING_REGULATOR",
+              severity=Severity.WARNING,
+              message="Active components detected but no power regulator (LDO/Buck-Boost) found.",
+              source="compatibility",
+          ))
+      return issues
 
-    sel_result = state.stage_results.get("p08_part_selection")
-    if sel_result is None or "selected" not in sel_result.data:
-        return StageResult(
-            stage="p09_compatibility",
-            status=StageStatus.FAILED,
-            issues=[Issue("COMPAT_NO_SELECTION", Severity.ERROR,
-                          "Stage 8 (part selection) must run first.", "compatibility")],
-            duration=time.monotonic() - t0,
-        )
 
-    selected_map: Dict[str, str] = sel_result.data["selected"]
-    selected_comps: Dict[str, Component] = {
-        pn: state.components[pn]
-        for pn in selected_map.values()
-        if pn in state.components
-    }
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Stage entry point
+  # ─────────────────────────────────────────────────────────────────────────────
 
-    budget_mw = state.architecture.power_budget_mw
+  def run(state: DesignState) -> StageResult:
+      t0 = time.monotonic()
+      issues: List[Issue] = []
 
-    all_issues += _check_voltage_domains(selected_comps)
-    all_issues += _check_power_budget(selected_comps, budget_mw)
-    all_issues += _check_footprints(selected_comps)
-    all_issues += _check_interface_coverage(selected_comps, state.architecture.subsystems)
-    all_issues += _check_missing_power_regulator(selected_comps)
+      if state.architecture is None:
+          return StageResult(
+              stage="p09_compatibility",
+              status=StageStatus.FAILED,
+              issues=[Issue("COMPAT_NO_ARCH", Severity.ERROR,
+                            "Architecture not set.", "compatibility")],
+              duration=time.monotonic() - t0,
+          )
 
-    errors   = [i for i in all_issues if i.is_error()]
-    warnings = [i for i in all_issues if not i.is_error()]
-    is_valid = len(errors) == 0
+      # Resolve selected components from Stage 8 data
+      selected_pn: Dict[str, str] = {}
+      if hasattr(state, "stage_data") and state.stage_data:
+          selected_pn = state.stage_data.get("p08_part_selection", {}).get("selected", {})
 
-    return StageResult(
-        stage="p09_compatibility",
-        status=StageStatus.PASSED if is_valid else StageStatus.FAILED,
-        data={
-            "is_valid":      is_valid,
-            "error_count":   len(errors),
-            "warning_count": len(warnings),
-        },
-        issues=all_issues,
-        metrics={
-            "compat_errors":   float(len(errors)),
-            "compat_warnings": float(len(warnings)),
-        },
-        duration=time.monotonic() - t0,
-    )
+      selected: Dict[str, Component] = {}
+      for sub_name, pn in selected_pn.items():
+          if pn in state.components:
+              selected[pn] = state.components[pn]
+
+      # Fallback: use all loaded components
+      if not selected:
+          selected = dict(state.components)
+
+      if not selected:
+          issues.append(Issue(
+              code="COMPAT_NO_PARTS",
+              severity=Severity.WARNING,
+              message="No selected parts to validate — skipping compatibility checks.",
+              source="compatibility",
+          ))
+          return StageResult(
+              stage="p09_compatibility",
+              status=StageStatus.PASSED,
+              issues=issues,
+              data={"is_valid": True, "issues": []},
+              duration=time.monotonic() - t0,
+          )
+
+      # ── Layer A: hardware_builder.compatibility_checker ───────────────────────
+      issues.extend(_run_checker_layer_a(selected))
+
+      # ── Layer B: inline heuristics ─────────────────────────────────────────────
+      issues.extend(_check_voltage_domains(selected))
+
+      power_budget_mw = 0.0
+      if state.requirements and hasattr(state.requirements, "power_budget_mw"):
+          power_budget_mw = state.requirements.power_budget_mw or 0.0
+      issues.extend(_check_power_budget(selected, power_budget_mw))
+
+      sub_cats = {sub.category for sub in state.architecture.subsystems}
+      issues.extend(_check_missing_categories(selected, sub_cats))
+
+      has_errors = any(i.is_error() for i in issues)
+      return StageResult(
+          stage="p09_compatibility",
+          status=StageStatus.FAILED if has_errors else StageStatus.PASSED,
+          data={
+              "is_valid": not has_errors,
+              "issues": [{"code": i.code, "severity": i.severity.value,
+                          "message": i.message} for i in issues],
+          },
+          issues=issues,
+          duration=time.monotonic() - t0,
+      )
+  

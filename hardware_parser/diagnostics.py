@@ -7,7 +7,7 @@ Manages error and warning reporting with precise source locations.
 from dataclasses import dataclass
 from typing import Optional, List
 from enum import Enum
-from ast_nodes import SourceLoc
+from .ast_nodes import SourceLoc
 
 
 class Severity(Enum):

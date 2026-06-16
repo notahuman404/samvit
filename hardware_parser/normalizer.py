@@ -5,9 +5,9 @@ Implements net merger algorithm and physical value normalization.
 """
 
 from typing import Dict, List, Tuple, Set, Optional
-from ast_nodes import *
-from resolver import ResolvedAST
-from units import normalize_physical_value, get_base_unit, get_unit_dimension
+from .ast_nodes import *
+from .resolver import ResolvedAST
+from .units import normalize_physical_value, get_base_unit, get_unit_dimension
 
 
 class NormalizedNet:

@@ -68,6 +68,7 @@ from agent.pipeline import (
     p08_part_selection,
     p09_compatibility,
     p10_schematic_graph,
+    p10b_hwdl_validate,
     p11_schematic_gen,
     p12_footprint,
     p13_placement,
@@ -90,7 +91,7 @@ from agent.pipeline import (
     p30_human_override,
 )
 
-log = logging.getLogger("samvit.orchestrator")
+log = logging.getLogger("agent.orchestrator")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

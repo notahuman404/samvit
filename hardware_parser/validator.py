@@ -5,9 +5,9 @@ Implements scope, reference, connectivity, electrical, unit, and structural rule
 """
 
 from typing import Dict, List, Set, Optional, Tuple, Union
-from ast_nodes import *
-from diagnostics import DiagList, Severity
-from units import are_units_compatible, get_unit_dimension, UNITS
+from .ast_nodes import *
+from .diagnostics import DiagList, Severity
+from .units import are_units_compatible, get_unit_dimension, UNITS
 
 
 class Validator:
