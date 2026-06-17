@@ -191,6 +191,9 @@ class Component:
     dependencies: List[str]          = field(default_factory=list)
     notes:        str                = ""
     confidence:   float              = 0.0
+    # Multiplier applied to the package θ_ja in thermal analysis.
+    # 1.0 = no cooling; <1.0 models a heatsink / copper pour / fan.
+    thermal_mitigation: float        = 1.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -326,7 +329,7 @@ class DesignMetrics:
 @dataclass
 class RepairInstruction:
     target_stage:  str
-    action:        str          # "replace_part" | "reroute_net" | "add_component" | "adjust_value"
+    action:        str          # "replace_part" | "reroute_net" | "add_component" | "adjust_value" | "fix_erc" | "fix_thermal" | "reduce_power" | "fix_simulation" | "fix_placement" | "change_footprint"
     component:     str          = ""
     detail:        Dict[str, Any] = field(default_factory=dict)
     priority:      int          = 1

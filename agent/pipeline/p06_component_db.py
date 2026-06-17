@@ -118,10 +118,23 @@ class ComponentDB:
             i_ma = 0.0
 
         category = str(row.get("category", "OTHER"))
-        pins: Dict[str, PinSpec] = {
-            "VDD": PinSpec("VDD", PinType.POWER_IN,  v_min, v_max, 0, i_ma / 1000.0),
-            "GND": PinSpec("GND", PinType.POWER_IN,  0, 0, 0, 0),
+        # Power-source components must expose a POWER_OUT pin, otherwise every
+        # VDD rail they feed is seen as "undriven" by ERC (ERC_UNPOWERED_VDD).
+        # The schematic graph builder wires power sources via their "VOUT" pin.
+        _POWER_SOURCE_CATS = {
+            "POWER", "Charger IC", "Buck-Boost", "Boost Converter", "LDO", "Battery",
         }
+        if category in _POWER_SOURCE_CATS:
+            pins: Dict[str, PinSpec] = {
+                "VIN":  PinSpec("VIN",  PinType.POWER_IN,  v_min, v_max * 1.5, 0, i_ma / 1000.0),
+                "VOUT": PinSpec("VOUT", PinType.POWER_OUT, v_min, v_max if v_max > 0 else 3.3, 2.0, 0),
+                "GND":  PinSpec("GND",  PinType.POWER_IN,  0, 0, 0, 0),
+            }
+        else:
+            pins = {
+                "VDD": PinSpec("VDD", PinType.POWER_IN,  v_min, v_max, 0, i_ma / 1000.0),
+                "GND": PinSpec("GND", PinType.POWER_IN,  0, 0, 0, 0),
+            }
 
         return Component(
             part_number=str(row.get("name", "UNKNOWN")),

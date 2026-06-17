@@ -95,7 +95,16 @@ Sim pass rate: {sim_pass_rate}
 4. REPAIR PLAN
    For each failure, produce a specific, smallest-scope repair instruction:
    - Which stage to target
-   - What action to take (replace_part | reroute_net | add_component | adjust_value | change_footprint | split_net)
+   - What action to take. Choose the action that changes the quantity the
+     failing check actually measures:
+       * fix_erc        — schematic/netlist ERC errors (unpowered/undriven rails)
+       * fix_thermal     — junction temperature over limit (adds heatsink/copper pour)
+       * reduce_power    — simulation/power scenarios failing on excessive draw
+       * fix_simulation  — missing regulator / pull-ups
+       * fix_placement   — DRC component-overlap errors
+       * replace_part | add_component | adjust_value | change_footprint | reroute_net
+     NOTE: reroute_net only re-routes PCB copper — it CANNOT fix ERC, thermal,
+     or power problems. Use the dedicated actions above for those.
    - Which component / net / rule is affected
    - Exact new value / replacement part / connection change
 
@@ -278,11 +287,13 @@ async def run_async(state: DesignState, gemini_manager: Any) -> StageResult:
         # Heuristic fallback: generate repairs from stage errors directly
         repairs: List[RepairInstruction] = []
         if m.erc_errors > 0:
+            # ERC errors are schematic/netlist violations — repair the netlist,
+            # not the PCB copper (reroute_net cannot clear an ERC error).
             repairs.append(RepairInstruction(
-                target_stage="p10_schematic_graph",
-                action="reroute_net",
-                component="all",
-                detail={"reason": "ERC errors detected — revisit net connections"},
+                target_stage="p16_erc",
+                action="fix_erc",
+                component="schematic",
+                detail={"reason": "ERC errors detected — fix power-net connectivity"},
                 priority=1,
             ))
         if m.drc_errors > 0:
@@ -319,6 +330,25 @@ async def run_async(state: DesignState, gemini_manager: Any) -> StageResult:
                 component="simulation",
                 detail={"reason": "Sim pass rate below 75% — add missing components"},
                 priority=1,
+            ))
+            # Sim scenarios also fail on excessive power draw — reduce the
+            # dominant load so power/voltage-stability scenarios pass.
+            repairs.append(RepairInstruction(
+                target_stage="p21_simulation",
+                action="reduce_power",
+                component="power_budget",
+                detail={"reason": "Sim failing on power budget — reduce load draw"},
+                priority=2,
+            ))
+        if m.max_temp_c >= 105.0:
+            # Over-temperature: lower the hot component's effective θ_ja
+            # (heatsink / copper pour). Adding cooling parts alone does nothing.
+            repairs.append(RepairInstruction(
+                target_stage="p19_thermal",
+                action="fix_thermal",
+                component="thermal",
+                detail={"reason": "Junction temperature over limit — add heatsink/copper pour"},
+                priority=2,
             ))
         if __import__('math').isfinite(m.estimated_battery_h) and m.estimated_battery_h >= 87600:
             repairs.append(RepairInstruction(

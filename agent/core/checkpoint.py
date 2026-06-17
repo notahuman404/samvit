@@ -85,10 +85,14 @@ class CheckpointManager:
         # Core state JSON
         (cp_dir / "state.json").write_text(state.to_json(), encoding="utf-8")
 
-        # Extra artefact files (KiCad, BOM, Gerbers, …)
+        # Extra artefact files (KiCad, BOM, Gerbers, …). Some artefacts live in
+        # sub-directories (e.g. "gerbers/samvit.GTL"), so ensure the parent dir
+        # exists before writing.
         if extra_files:
             for filename, content in extra_files.items():
-                (cp_dir / filename).write_text(content, encoding="utf-8")
+                out_path = cp_dir / filename
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(content, encoding="utf-8")
 
         # Manifest
         manifest: Dict[str, Any] = {
