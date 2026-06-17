@@ -49,6 +49,50 @@ _ZONES: Dict[str, Tuple[float, float]] = {
 
 _GRID = 2.54   # mm — standard KiCad 100mil grid
 
+_DEFAULT_ZONE = "PASSIVE"   # fallback zone for unrecognised categories
+
+
+# Reverse map: fine-grained DB category (e.g. "Depth Sensor", "LDO") → coarse
+# zone category (e.g. "SENSOR", "POWER").  Built from the same alias table that
+# part selection (p08) uses, so the two stages stay in sync.
+def _build_db_to_zone() -> Dict[str, str]:
+    try:
+        from agent.pipeline.p08_part_selection import _CATEGORY_DB_ALIASES
+    except Exception:
+        return {}
+    mapping: Dict[str, str] = {}
+    for coarse, db_cats in _CATEGORY_DB_ALIASES.items():
+        zone = coarse.upper()
+        if zone not in _ZONES:
+            continue
+        for db_cat in db_cats:
+            mapping.setdefault(db_cat.upper(), zone)
+    return mapping
+
+
+_DB_CATEGORY_TO_ZONE: Dict[str, str] = _build_db_to_zone()
+
+
+def _resolve_zone(arch_category: Optional[str], db_category: Optional[str]) -> str:
+    """
+    Resolve the placement zone for a component.
+
+    The zone table is keyed by coarse architecture categories (SENSOR, POWER,
+    ...), but a selected component carries its fine-grained DB category
+    ("Depth Sensor", "LDO", ...).  Prefer the subsystem's architecture category;
+    fall back to mapping the DB category back to its coarse zone; finally use a
+    default zone.  Without this, fine-grained categories miss the zone table and
+    every component collapses onto one coordinate, producing permanent
+    DRC_COMPONENT_OVERLAP errors that no repair can clear.
+    """
+    if arch_category and arch_category.upper() in _ZONES:
+        return arch_category.upper()
+    if db_category and db_category.upper() in _ZONES:
+        return db_category.upper()
+    if db_category and db_category.upper() in _DB_CATEGORY_TO_ZONE:
+        return _DB_CATEGORY_TO_ZONE[db_category.upper()]
+    return _DEFAULT_ZONE
+
 
 def _snap(v: float, grid: float = _GRID) -> float:
     return round(v / grid) * grid
@@ -59,20 +103,24 @@ def _place_components(
     components: Dict[str, "Component"],
     board_w: float,
     board_h: float,
+    sub_category_map: Optional[Dict[str, str]] = None,  # subsystem_name → arch category
 ) -> List[PlacedComponent]:
     """
     Assign positions using zone clustering + offset within each zone.
     """
+    sub_category_map = sub_category_map or {}
     placed: List[PlacedComponent] = []
     zone_counters: Dict[str, int] = {}
+    des_counter: int = 0
 
     for sub_name, pn in selected_map.items():
         comp = components.get(pn)
-        cat  = comp.category if comp else "PASSIVE"
+        zone = _resolve_zone(sub_category_map.get(sub_name),
+                             comp.category if comp else None)
 
-        x0, y0 = _ZONES.get(cat, (50.0, 50.0))
-        idx = zone_counters.get(cat, 0)
-        zone_counters[cat] = idx + 1
+        x0, y0 = _ZONES[zone]
+        idx = zone_counters.get(zone, 0)
+        zone_counters[zone] = idx + 1
 
         # Offset within zone: zigzag 3-column grid
         col = idx % 3
@@ -82,8 +130,9 @@ def _place_components(
 
         footprint = comp.footprint if comp and comp.footprint else "Connector:Conn_01x02"
 
+        des_counter += 1
         placed.append(PlacedComponent(
-            designator=_des_from_sub(sub_name, idx),
+            designator=_des_from_sub(sub_name, des_counter - 1),
             footprint=footprint,
             x=x,
             y=y,
@@ -131,12 +180,20 @@ def run(state: DesignState) -> StageResult:
 
     selected_map: Dict[str, str] = sel_result.data.get("selected", {})
 
+    sub_category_map: Dict[str, str] = {}
+    if state.architecture:
+        sub_category_map = {
+            sub.name: sub.category for sub in state.architecture.subsystems
+        }
+
     if state.layout is None:
         state.layout = PCBLayout(board_width=100.0, board_height=80.0)
 
     board_w = state.layout.board_width
     board_h = state.layout.board_height
-    placed = _place_components(selected_map, state.components, board_w, board_h)
+    placed = _place_components(
+        selected_map, state.components, board_w, board_h, sub_category_map,
+    )
     board_area = board_w * board_h
 
     state.layout.placed = placed
