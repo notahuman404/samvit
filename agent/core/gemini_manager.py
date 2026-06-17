@@ -114,12 +114,24 @@ class GeminiModelManager:
     DEFAULT_HARD_BLOCK_SECS: int  = 65
     MAX_RETRIES:              int  = 6
     MIN_PROMPT_CHARS:         int  = 200   # warn if prompt is too short (under-batched)
+    DEFAULT_CALL_TIMEOUT_SECS: float = 120.0  # hard cap on a single Gemini round-trip
+
+    # Tier downgrade chain. When every (key × model) in the primary tier is
+    # rate-limited / exhausted, fall through to the next tier instead of just
+    # sleeping. heavy → medium is allowed; medium → light is intentionally NOT
+    # (a too-weak model produces unusable repair plans).
+    TIER_FALLBACK: Dict[str, List[str]] = {
+        "heavy":  ["heavy", "medium"],
+        "medium": ["medium"],
+        "light":  ["light"],
+    }
 
     def __init__(
         self,
         api_keys: List[str],
         default_tier: str = "heavy",
         max_output_tokens: int = 8192,
+        call_timeout_secs: float = DEFAULT_CALL_TIMEOUT_SECS,
     ) -> None:
         if not api_keys:
             raise ValueError("At least one Gemini API key is required.")
@@ -127,6 +139,7 @@ class GeminiModelManager:
         self.api_keys          = list(api_keys)
         self.default_tier      = default_tier
         self.max_output_tokens = max_output_tokens
+        self.call_timeout_secs = call_timeout_secs
 
         # (api_key, model) → QuotaSnapshot
         self._quotas: Dict[Tuple[str, str], QuotaSnapshot] = {}
@@ -163,26 +176,32 @@ class GeminiModelManager:
         with self._lock:
             self._quotas[(key, model)].mark_success()
 
-    def _pick(self, tier: str) -> Optional[Tuple[str, str]]:
+    def _tier_chain(self, task: str) -> List[str]:
+        """Ordered list of tiers to try for a requested task (primary first)."""
+        return self.TIER_FALLBACK.get(task, [task])
+
+    def _pick(self, task: str) -> Optional[Tuple[str, str, str]]:
         """
-        Pick the next available (api_key, model) pair for the given tier.
+        Pick the next available (api_key, model, tier) for the requested task,
+        walking the tier-fallback chain (e.g. heavy → medium) so a fully
+        rate-limited primary tier transparently downgrades instead of stalling.
         Rotates through keys in round-robin; tries each model in priority order.
-        Returns None if everything is blocked.
+        Returns None only if every model in every fallback tier is blocked.
         """
-        models = self.TIER_MAP.get(tier, self.HEAVY_MODELS)
         n_keys = len(self.api_keys)
+        for tier in self._tier_chain(task):
+            models = self.TIER_MAP.get(tier, self.HEAVY_MODELS)
+            for model in models:
+                start = self._rr.get(tier, 0)
+                for offset in range(n_keys):
+                    idx = (start + offset) % n_keys
+                    key = self.api_keys[idx]
+                    snap = self._quota(key, model)
+                    if snap.is_available:
+                        self._rr[tier] = (idx + 1) % n_keys
+                        return key, model, tier
 
-        for model in models:
-            start = self._rr.get(tier, 0)
-            for offset in range(n_keys):
-                idx = (start + offset) % n_keys
-                key = self.api_keys[idx]
-                snap = self._quota(key, model)
-                if snap.is_available:
-                    self._rr[tier] = (idx + 1) % n_keys
-                    return key, model
-
-        return None  # all blocked
+        return None  # everything blocked across all fallback tiers
 
     def _make_client(self, api_key: str) -> Any:
         """Lazily import google.generativeai and return a configured client."""
@@ -231,69 +250,119 @@ class GeminiModelManager:
             )
 
         last_error: Optional[Exception] = None
+        t_overall = time.monotonic()
 
         for attempt in range(self.MAX_RETRIES):
+            tier_used = task
             if model_override:
                 # Try each key in order for the overridden model
                 pair = None
                 for key in self.api_keys:
                     snap = self._quota(key, model_override)
                     if snap.is_available:
-                        pair = (key, model_override)
+                        pair = (key, model_override, task)
                         break
             else:
                 pair = self._pick(task)
 
             if pair is None:
-                # All keys blocked — wait for the shortest block to expire
+                # Everything blocked across all fallback tiers — wait for the
+                # shortest block to expire, reporting WHY so it's clearly a
+                # rate-limit wait and not a hang.
+                tiers = self._tier_chain(task)
                 min_wait = min(
                     self._quota(k, m).seconds_blocked
                     for k in self.api_keys
-                    for m in self.TIER_MAP.get(task, self.HEAVY_MODELS)
+                    for t in tiers
+                    for m in self.TIER_MAP.get(t, self.HEAVY_MODELS)
                 )
                 wait = max(min_wait, 2.0)
-                logger.info("All keys blocked. Waiting %.1fs …", wait)
+                logger.warning(
+                    "⏳ Gemini: all keys/models in tier(s) %s rate-limited "
+                    "(attempt %d/%d) — waiting %.1fs for quota to free up …",
+                    tiers, attempt + 1, self.MAX_RETRIES, wait,
+                )
                 await asyncio.sleep(wait)
                 continue
 
-            api_key, model = pair
+            api_key, model, tier_used = pair
+            if tier_used != task:
+                logger.warning(
+                    "⬇️  Gemini downgrade: requested tier '%s' is exhausted — "
+                    "falling back to '%s' model=%s",
+                    task, tier_used, model,
+                )
+
+            logger.info(
+                "→ Gemini request: tier=%s model=%s key=...%s attempt=%d/%d "
+                "prompt=%d chars timeout=%.0fs",
+                tier_used, model, api_key[-4:], attempt + 1, self.MAX_RETRIES,
+                len(prompt), self.call_timeout_secs,
+            )
+            t_call = time.monotonic()
 
             try:
-                response_text = await self._call_once(
-                    api_key, model, prompt, system_instruction, temperature
+                response_text = await asyncio.wait_for(
+                    self._call_once(api_key, model, prompt, system_instruction, temperature),
+                    timeout=self.call_timeout_secs,
                 )
                 self._mark_success(api_key, model)
                 logger.info(
-                    "Gemini call OK — model=%s key=...%s attempt=%d",
-                    model, api_key[-4:], attempt + 1,
+                    "✅ Gemini call OK — model=%s key=...%s attempt=%d  %.1fs "
+                    "(%d chars in / %d chars out)",
+                    model, api_key[-4:], attempt + 1, time.monotonic() - t_call,
+                    len(prompt), len(response_text or ""),
                 )
                 return response_text
+
+            except asyncio.TimeoutError:
+                # Not a hang — the call exceeded the per-request budget. Log it
+                # explicitly and retry (with backoff) on a fresh key/model.
+                last_error = TimeoutError(
+                    f"Gemini call exceeded {self.call_timeout_secs:.0f}s")
+                wait = min(2 ** attempt, 30)
+                logger.warning(
+                    "⏱️  Gemini TIMEOUT after %.0fs — model=%s key=...%s "
+                    "attempt %d/%d — retrying in %ds (will rotate key/model)",
+                    self.call_timeout_secs, model, api_key[-4:],
+                    attempt + 1, self.MAX_RETRIES, wait,
+                )
+                await asyncio.sleep(wait)
+                continue
 
             except Exception as exc:
                 last_error = exc
                 exc_str    = str(exc).lower()
+                elapsed    = time.monotonic() - t_call
 
                 if "429" in exc_str or "quota" in exc_str or "resource_exhausted" in exc_str:
                     retry_after = self._parse_retry_after(exc) or self.DEFAULT_HARD_BLOCK_SECS
                     self._mark_429(api_key, model, retry_after)
-                    # Immediately retry — _pick will select a different key/model
+                    logger.warning(
+                        "🚦 Gemini RATE-LIMIT (429) — model=%s key=...%s after %.1fs "
+                        "— blocking %ds and retrying on another key/model "
+                        "(may downgrade tier)",
+                        model, api_key[-4:], elapsed, retry_after,
+                    )
+                    # Immediately retry — _pick will select a different key/model/tier
                     continue
 
                 if "400" in exc_str or "invalid" in exc_str:
-                    logger.error("Bad request to Gemini: %s", exc)
+                    logger.error("❌ Bad request to Gemini (model=%s): %s", model, exc)
                     raise
 
                 # Transient network / server error — exponential backoff
                 wait = 2 ** attempt
                 logger.warning(
-                    "Gemini error attempt %d/%d: %s — retrying in %ds",
-                    attempt + 1, self.MAX_RETRIES, exc, wait,
+                    "⚠️  Gemini error attempt %d/%d (model=%s, %.1fs): %s "
+                    "— retrying in %ds",
+                    attempt + 1, self.MAX_RETRIES, model, elapsed, exc, wait,
                 )
                 await asyncio.sleep(wait)
 
         raise RuntimeError(
-            f"Gemini call failed after {self.MAX_RETRIES} attempts. "
-            f"Last error: {last_error}"
+            f"Gemini call failed after {self.MAX_RETRIES} attempts "
+            f"({time.monotonic() - t_overall:.0f}s total). Last error: {last_error}"
         )
 
     async def _call_once(
