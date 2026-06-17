@@ -116,6 +116,15 @@ def run(state: DesignState) -> StageResult:
     total_power_mw = sum(r.power_mw for r in rails.values())
     total_draw_ma  = sum(r.total_draw_ma for r in rails.values())
 
+    # Fallback: component DB may store current_ma as "50mA" strings; float() strips
+    # the "mA" suffix → all current_ma = 0 → total_draw_ma = 0 → battery = inf.
+    # Use architecture subsystem current estimates so battery life is always realistic.
+    if total_draw_ma <= 0 and state.architecture:
+        for _sub in state.architecture.subsystems:
+            if _sub.category not in ("POWER",) and _sub.current_ma > 0:
+                total_draw_ma += _sub.current_ma
+        total_power_mw = total_draw_ma * 3.3  # 3.3 V rail average
+
     # Battery life estimate
     battery_cap_mah = _find_battery_capacity(state.components)
     battery_life_h  = _estimate_battery_life(battery_cap_mah, total_draw_ma)
