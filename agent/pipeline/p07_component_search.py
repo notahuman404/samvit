@@ -63,20 +63,18 @@ def _search_via_retrival(sub: Subsystem, top_n: int = 5) -> List[Tuple[str, floa
     except Exception:
         return []
 
-    # Build keyword list from subsystem
-    keywords = [sub.name.lower(), sub.category.lower(), sub.interface.lower()]
-    if sub.interface:
-        keywords.append(sub.interface.lower())
-
-    # Expand keywords via CATEGORY_ALIASES
-    db_categories: set = set()
-    for kw in keywords:
-        for alias_key, cats in CATEGORY_ALIASES.items():
-            if alias_key in kw or kw in alias_key:
-                db_categories.update(cats)
-    # Direct category match
+    # Expand db_categories from sub.category ONLY — never from sub.name or
+    # sub.interface. Using interface keywords (e.g. "I2C") caused CATEGORY_ALIASES
+    # to add "IO Expander" into the search set, letting MCP23017 outrank the
+    # real MCU (STM32F103C8T6) for the microcontroller subsystem.
     direct_cats = CATEGORY_KEYWORDS.get(sub.category, [sub.category])
-    db_categories.update(direct_cats)
+    db_categories: set = set(direct_cats)
+    cat_kw = sub.category.lower()
+    for alias_key, cats in CATEGORY_ALIASES.items():
+        if (alias_key.lower() == cat_kw
+                or cat_kw in alias_key.lower()
+                or alias_key.lower() in cat_kw):
+            db_categories.update(cats)
 
     results: List[Tuple[str, float]] = []
     for part in parts:
