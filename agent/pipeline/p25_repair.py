@@ -90,7 +90,7 @@ def _repair_replace_part(
         try:
             import os as _os, sys as _sys, asyncio as _asyncio
             import concurrent.futures as _cf
-            _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..", ".."))
+            _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", ".."))
             if _root not in _sys.path:
                 _sys.path.insert(0, _root)
             from hardware_builder.part_selection_engine import (  # type: ignore
