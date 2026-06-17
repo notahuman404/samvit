@@ -286,12 +286,24 @@ async def run_async(state: DesignState, gemini_manager: Any) -> StageResult:
                 priority=1,
             ))
         if m.drc_errors > 0:
+            # reroute_net always has an effect; adjust_value supplies the required field+value
             repairs.append(RepairInstruction(
-                target_stage="p13_placement",
+                target_stage="p14_routing",
+                action="reroute_net",
+                component="all",
+                detail={"reason": "DRC clearance/spacing errors — force full re-route"},
+                priority=2,
+            ))
+            repairs.append(RepairInstruction(
+                target_stage="p15_rules",
                 action="adjust_value",
                 component="all",
-                detail={"reason": "DRC errors detected — spacing/clearance issue"},
-                priority=2,
+                detail={
+                    "field": "min_clearance_mm",
+                    "value": 0.3,
+                    "reason": "Increase clearance to reduce DRC violations",
+                },
+                priority=3,
             ))
         if m.sim_pass_rate < 0.75:
             repairs.append(RepairInstruction(
