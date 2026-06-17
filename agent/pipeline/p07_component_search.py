@@ -52,7 +52,7 @@ def _search_via_retrival(sub: Subsystem, top_n: int = 5) -> List[Tuple[str, floa
     try:
         import os, sys
         # Ensure hardware_builder is importable from the repo root
-        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         if repo_root not in sys.path:
             sys.path.insert(0, repo_root)
 
