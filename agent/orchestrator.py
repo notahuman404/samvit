@@ -46,7 +46,9 @@ Gemini call budget: 4 total
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
+import math
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -231,6 +233,21 @@ def _local_validate_segment(
 # Fix loop  (Failure → Classify → RCA → Impact → Plan → Apply → Validate)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _design_score(m: Optional[Any]) -> float:
+    """
+    Scalar quality score for a design — LOWER is better. Used to detect whether
+    an iteration actually improved the hardware and to keep the best design.
+    """
+    if m is None:
+        return float("inf")
+    score = m.erc_errors * 1000.0 + m.drc_errors * 100.0
+    score += (1.0 - m.sim_pass_rate) * 200.0
+    score += max(0.0, m.max_temp_c - 85.0) * 2.0
+    if math.isfinite(m.estimated_battery_h):
+        score += max(0.0, 8.0 - m.estimated_battery_h)
+    return score
+
+
 async def _fix_loop(
     state: DesignState,
     gemini: GeminiModelManager,
@@ -243,6 +260,8 @@ async def _fix_loop(
 
     Returns True if the design passes all checks after fixing.
     """
+    prev_score = _design_score(state.metrics)
+    stagnant_rounds = 0
     for fix_round in range(1, max_fix_rounds + 1):
         log.info("━" * 60)
         log.info("  FIX ROUND %d / %d", fix_round, max_fix_rounds)
@@ -289,11 +308,28 @@ async def _fix_loop(
         # ── Save checkpoint after each fix round ──────────────────────────────
         _save_checkpoint(state, checkpoint, label=f"fix_round_{fix_round}")
 
-        # Check if design is now clean
+        # Check if design is now clean (incl. thermal within safe limit)
         m = state.metrics
-        if m and m.erc_errors == 0 and m.drc_errors == 0 and m.sim_pass_rate >= 0.75:
+        if (m and m.erc_errors == 0 and m.drc_errors == 0
+                and m.sim_pass_rate >= 0.75 and m.max_temp_c < 105.0):
             log.info("  ✅  Design passed all checks after fix round %d!", fix_round)
             return True
+
+        # ── Improvement tracking: detect when repairs stop moving the metrics ──
+        cur_score = _design_score(m)
+        log.info("  📊  Design score: %.1f → %.1f (lower is better)", prev_score, cur_score)
+        if cur_score < prev_score - 1e-6:
+            stagnant_rounds = 0
+        else:
+            stagnant_rounds += 1
+            if stagnant_rounds >= 2:
+                log.warning(
+                    "  ⚠️  No measurable improvement over %d rounds — "
+                    "repairs cannot move the remaining metrics. Stopping fix loop.",
+                    stagnant_rounds,
+                )
+                return False
+        prev_score = min(prev_score, cur_score)
 
     log.warning("  ⚠️  Max fix rounds (%d) reached without full resolution.", max_fix_rounds)
     return False
@@ -515,6 +551,9 @@ class SamvitOrchestrator:
         # ── Phase 6: Main iteration loop (Critique → Repair → Validate) ──────
         log.info("\n🔁  PHASE 6 — CRITIQUE → REPAIR → VALIDATE LOOP")
         design_clean = False
+        best_score = _design_score(state.metrics)
+        best_state: Optional[DesignState] = copy.deepcopy(state)
+        stagnant_iters = 0
 
         for main_iter in range(1, self.max_main_iterations + 1):
             state.iteration = main_iter
@@ -535,12 +574,41 @@ class SamvitOrchestrator:
 
             if design_clean:
                 log.info("  ✅  Design is CLEAN after iteration %d!", main_iter)
+                best_state = copy.deepcopy(state)
+                best_score = _design_score(state.metrics)
                 break
 
             log.info("  ↩️  Design still has issues — re-running full validation …")
             r22 = _run("p22_test_gen", p22_test_gen.run, state)
             state.record(r22)
             _full_validate(state)
+
+            # ── Track the best design and stop early if it plateaus ──────────
+            cur_score = _design_score(state.metrics)
+            if cur_score < best_score - 1e-6:
+                best_score = cur_score
+                best_state = copy.deepcopy(state)
+                stagnant_iters = 0
+            else:
+                stagnant_iters += 1
+                if stagnant_iters >= 2:
+                    log.warning(
+                        "  ⚠️  No improvement over %d iterations (best score %.1f) — "
+                        "stopping early instead of exhausting iterations.",
+                        stagnant_iters, best_score,
+                    )
+                    break
+
+        # Restore the best design seen, so exported artefacts reflect it.
+        if (not design_clean and best_state is not None
+                and _design_score(state.metrics) > best_score + 1e-6):
+            log.info("  ↺  Restoring best-known design (score %.1f).", best_score)
+            state.components    = best_state.components
+            state.schematic     = best_state.schematic
+            state.layout        = best_state.layout
+            state.rules         = best_state.rules
+            state.metrics       = best_state.metrics
+            state.stage_results = best_state.stage_results
 
         # ── Phase 7: Export artefacts ─────────────────────────────────────────
         log.info("\n📦  PHASE 7 — EXPORT ARTEFACTS")

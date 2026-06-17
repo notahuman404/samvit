@@ -126,7 +126,10 @@ def run(state: DesignState) -> StageResult:
             # Simple: P = V × I
             p_mw = comp.voltage_max * comp.current_ma
 
-        theta = _resolve_theta(comp)
+        # thermal_mitigation < 1.0 models an added heatsink / copper pour / fan
+        # lowering the effective junction-to-ambient thermal resistance.
+        mitigation = max(getattr(comp, "thermal_mitigation", 1.0), 0.05)
+        theta = _resolve_theta(comp) * mitigation
         t_j   = T_AMBIENT + (p_mw / 1000.0) * theta
 
         max_temp = max(max_temp, t_j)

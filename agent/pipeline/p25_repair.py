@@ -33,9 +33,17 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set
 
 from agent.core.models import (
-    Component, DesignRules, DesignState, Issue, RepairInstruction,
+    Component, DesignRules, DesignState, Issue, NetNode,
+    PinSpec, PinType, RepairInstruction,
     Severity, StageResult, StageStatus,
 )
+
+# Categories that act as power sources (regulators, chargers, battery).
+_POWER_SOURCE_CATS = {
+    "POWER", "Charger IC", "Buck-Boost", "Boost Converter", "LDO", "Battery",
+}
+# Junction temperature above which thermal repair is required (mirror of p19).
+_T_ERR_LIMIT = 105.0
 
 log = logging.getLogger(__name__)
 
@@ -175,17 +183,31 @@ def _ensure_component(
         return resolved
 
     # Create ghost component
+    v_min = float(detail.get("voltage_min", 0.0))
+    v_max = float(detail.get("voltage_max", 3.3))
+    i_ma  = float(detail.get("current_ma", 100.0))
+    # Power-source ghosts need a POWER_OUT pin so they can drive a VDD rail,
+    # otherwise the rail they feed stays "undriven" in ERC.
+    if category in _POWER_SOURCE_CATS:
+        pins = {
+            "VIN":  PinSpec("VIN",  PinType.POWER_IN,  v_min, v_max * 1.5, 0, i_ma / 1000.0),
+            "VOUT": PinSpec("VOUT", PinType.POWER_OUT, v_min, v_max if v_max > 0 else 3.3, 2.0, 0),
+            "GND":  PinSpec("GND",  PinType.POWER_IN,  0, 0, 0, 0),
+        }
+    else:
+        pins = {}
     state.components[part_id] = Component(
         part_number=part_id,
         manufacturer="Generic",
         category=category,
         description=detail.get("reason", f"Repair-added: {part_id}"),
-        voltage_min=float(detail.get("voltage_min", 0.0)),
-        voltage_max=float(detail.get("voltage_max", 3.3)),
-        current_ma=float(detail.get("current_ma", 100.0)),
+        voltage_min=v_min,
+        voltage_max=v_max,
+        current_ma=i_ma,
         package=detail.get("package", "0402"),
         footprint=detail.get("footprint", "Resistor_SMD:R_0402_1005Metric"),
         cost_usd=float(detail.get("cost_usd", 0.10)),
+        pins=pins,
         notes=detail.get("reason", "") + " [repair-ghost]",
         confidence=0.4,
     )
@@ -402,16 +424,27 @@ def _repair_change_footprint(
     instr: RepairInstruction,
     _snapshot: Dict[str, Set[str]] = None,
 ) -> tuple[bool, str, Set[str]]:
-    pn     = instr.component
-    new_fp = instr.detail.get("new_footprint", "")
-    comp   = state.components.get(pn)
-    if comp and new_fp:
-        comp.footprint = new_fp
-        downstream = {"p12_footprint", "p13_placement", "p14_routing", "p17_drc", "p23_metrics"}
+    pn      = instr.component
+    new_fp  = instr.detail.get("new_footprint", "")
+    new_pkg = instr.detail.get("new_package", "")
+    comp    = state.components.get(pn)
+    if comp and (new_fp or new_pkg):
+        if new_fp:
+            comp.footprint = new_fp
+        # Thermal resolution keys off comp.package, not comp.footprint. Keep the
+        # package in sync so a footprint/package change actually affects θ_ja.
+        if new_pkg:
+            comp.package = new_pkg
+        elif new_fp:
+            comp.package = new_fp.split(":")[-1]
+        downstream = {
+            "p12_footprint", "p13_placement", "p14_routing",
+            "p17_drc", "p19_thermal", "p23_metrics",
+        }
         for s in downstream:
             state.stage_results.pop(s, None)
-        return True, f"Changed footprint of '{pn}' to '{new_fp}'.", downstream
-    return False, f"Component '{pn}' not found or no new_footprint provided.", set()
+        return True, f"Changed footprint/package of '{pn}' (fp='{new_fp}', pkg='{comp.package}').", downstream
+    return False, f"Component '{pn}' not found or no new_footprint/new_package provided.", set()
 
 
 def _repair_fix_simulation(
@@ -496,6 +529,160 @@ def _repair_fix_simulation(
     return True, "; ".join(applied_msgs), all_downstream
 
 
+def _dissipation_mw(comp: Component) -> float:
+    """Replicate p19_thermal's per-component dissipation estimate."""
+    if comp.category in ("POWER", "Charger IC", "Buck-Boost", "LDO"):
+        v_in   = comp.voltage_max * 1.2
+        v_out  = comp.voltage_min if comp.voltage_min > 0 else comp.voltage_max * 0.66
+        i_load = comp.current_ma / 1000.0
+        return max((v_in - v_out) * i_load * 1000.0, 0.0)
+    return comp.voltage_max * comp.current_ma
+
+
+def _selected_components(state: DesignState) -> Dict[str, Component]:
+    sel = state.stage_results.get("p08_part_selection")
+    selected = sel.data.get("selected", {}) if sel else {}
+    return {
+        pn: state.components[pn]
+        for pn in selected.values()
+        if pn in state.components
+    }
+
+
+def _repair_fix_thermal(
+    state: DesignState,
+    instr: RepairInstruction,
+    _snapshot: Dict[str, Set[str]] = None,
+) -> tuple[bool, str, Set[str]]:
+    """
+    Reduce the junction temperature of the hottest component(s) by modelling a
+    heatsink / copper pour / fan: lower the component's effective θ_ja via its
+    `thermal_mitigation` multiplier. Each application cuts the temperature rise,
+    so repeated rounds converge below the thermal limit.
+    """
+    comps = _selected_components(state)
+    if not comps:
+        return False, "No selected components to cool.", set()
+
+    ranked = sorted(comps.items(), key=lambda kv: _dissipation_mw(kv[1]), reverse=True)
+    touched: List[str] = []
+    for pn, comp in ranked[:2]:
+        if _dissipation_mw(comp) <= 0:
+            continue
+        comp.thermal_mitigation = max(0.1, getattr(comp, "thermal_mitigation", 1.0) * 0.4)
+        if "[heatsink]" not in comp.notes:
+            comp.notes += " [heatsink]"
+        touched.append(pn)
+
+    if not touched:
+        return False, "No dissipating component found to cool.", set()
+
+    downstream = {"p19_thermal", "p21_simulation", "p23_metrics"}
+    for s in downstream:
+        state.stage_results.pop(s, None)
+    return True, f"Applied heatsink/copper pour to {touched} (lowered θ_ja).", downstream
+
+
+def _repair_reduce_power(
+    state: DesignState,
+    instr: RepairInstruction,
+    _snapshot: Dict[str, Set[str]] = None,
+) -> tuple[bool, str, Set[str]]:
+    """
+    Lower the power draw of the highest-consumption load (models adding power
+    gating / a low-power operating mode / a more efficient variant). Reduces
+    total power so simulation power scenarios and voltage stability improve,
+    and extends battery life.
+    """
+    comps = _selected_components(state)
+    skip_cats = _POWER_SOURCE_CATS | {"PASSIVE"}
+    best: Optional[tuple[str, Component]] = None
+    best_p = 0.0
+    for pn, comp in comps.items():
+        if comp.category in skip_cats:
+            continue
+        p = comp.voltage_max * comp.current_ma
+        if p > best_p:
+            best_p, best = p, (pn, comp)
+
+    if best is None:
+        return False, "No reducible consumer found.", set()
+
+    pn, comp = best
+    old = comp.current_ma
+    new = max(5.0, round(old * 0.6, 2))
+    if new >= old:
+        return False, f"Consumer '{pn}' current already minimal.", set()
+    comp.current_ma = new
+
+    downstream = {"p18_power", "p19_thermal", "p21_simulation", "p23_metrics"}
+    for s in downstream:
+        state.stage_results.pop(s, None)
+    return True, f"Reduced '{pn}' draw {old:.0f}→{new:.0f}mA (low-power mode / power gating).", downstream
+
+
+def _repair_fix_erc(
+    state: DesignState,
+    instr: RepairInstruction,
+    snapshot: Dict[str, Set[str]] = None,
+) -> tuple[bool, str, Set[str]]:
+    """
+    Repair schematic-level ERC violations by operating on the netlist (what ERC
+    actually checks) rather than the PCB copper.
+
+    ERC_UNPOWERED_VDD → ensure a power source exposes a POWER_OUT pin and is
+                        connected to every rail that has POWER_IN pins but no
+                        driver.
+    """
+    if state.schematic is None:
+        return False, "No schematic to repair.", set()
+
+    des_to_pn = {sc.designator: sc.part_number for sc in state.schematic.components}
+
+    # 1. Guarantee every power-source component exposes a POWER_OUT pin.
+    power_sources: List[tuple[str, Component]] = []
+    msgs: List[str] = []
+    for des, pn in des_to_pn.items():
+        comp = state.components.get(pn)
+        if comp and comp.category in _POWER_SOURCE_CATS:
+            if not any(p.type == PinType.POWER_OUT for p in comp.pins.values()):
+                comp.pins["VOUT"] = PinSpec(
+                    "VOUT", PinType.POWER_OUT,
+                    comp.voltage_min, comp.voltage_max if comp.voltage_max > 0 else 3.3,
+                    2.0, 0.0,
+                )
+                msgs.append(f"Added POWER_OUT pin to '{pn}'.")
+            power_sources.append((des, comp))
+
+    # 2. Connect a power source to any rail that has POWER_IN pins but no driver.
+    if power_sources:
+        src_des, _ = power_sources[0]
+        for net in state.schematic.nets:
+            has_out = has_in = False
+            for node in net.nodes:
+                c = state.components.get(des_to_pn.get(node.designator, ""))
+                if not c or node.pin not in c.pins:
+                    continue
+                pspec = c.pins[node.pin]
+                if pspec.type == PinType.POWER_OUT and pspec.voltage_max > 0.1:
+                    has_out = True
+                if (pspec.type == PinType.POWER_IN
+                        and node.pin.upper() not in ("GND", "AGND", "PGND")):
+                    has_in = True
+            if has_in and not has_out:
+                net.nodes.append(NetNode(src_des, "VOUT"))
+                msgs.append(f"Connected '{src_des}.VOUT' to rail '{net.name}'.")
+
+    if not msgs:
+        codes = (snapshot or {}).get("p16_erc", set())
+        return False, f"No actionable ERC fix for codes {codes}.", set()
+
+    downstream = {"p16_erc", "p20_short_circuit", "p21_simulation", "p23_metrics"}
+    for s in downstream:
+        state.stage_results.pop(s, None)
+    return True, "; ".join(msgs), downstream
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Dispatcher
 # ──────────────────────────────────────────────────────────────────────────────
@@ -508,6 +695,9 @@ _HANDLERS = {
     "fix_placement":    _repair_fix_placement,
     "change_footprint": _repair_change_footprint,
     "fix_simulation":   _repair_fix_simulation,
+    "fix_erc":          _repair_fix_erc,
+    "fix_thermal":      _repair_fix_thermal,
+    "reduce_power":     _repair_reduce_power,
 }
 
 
@@ -526,6 +716,43 @@ def apply_repairs(
 
     m = state.metrics
     repair_actions = {r.action for r in repairs}
+
+    # ── Auto-inject ERC repair (priority -2, runs first) ─────────────────────
+    # ERC violations are schematic-level; reroute_net (PCB copper) can never
+    # clear them. fix_erc operates on the netlist.
+    if (m and m.erc_errors > 0 and "fix_erc" not in repair_actions):
+        repairs = [RepairInstruction(
+            target_stage="p16_erc",
+            action="fix_erc",
+            component="schematic",
+            detail={"reason": "Auto-injected: unresolved ERC errors"},
+            priority=-2,
+        )] + list(repairs)
+
+    # ── Auto-inject thermal repair if a component exceeds the thermal limit ──
+    # Adding cooling components does not lower an existing part's junction temp;
+    # fix_thermal reduces the hot part's effective θ_ja instead.
+    if (m and m.max_temp_c >= _T_ERR_LIMIT and "fix_thermal" not in repair_actions):
+        repairs = list(repairs) + [RepairInstruction(
+            target_stage="p19_thermal",
+            action="fix_thermal",
+            component="thermal",
+            detail={"reason": "Auto-injected: junction temperature over limit"},
+            priority=0,
+        )]
+
+    # ── Auto-inject power reduction when sim fails on power, not on a missing
+    # regulator/pull-up (which fix_simulation handles). ──────────────────────
+    if (m and m.sim_pass_rate < 0.75
+            and "reduce_power" not in repair_actions
+            and "SIM_NO_REGULATOR" not in sim_codes):
+        repairs = list(repairs) + [RepairInstruction(
+            target_stage="p21_simulation",
+            action="reduce_power",
+            component="power_budget",
+            detail={"reason": "Auto-injected: sim failing on excessive power draw"},
+            priority=60,
+        )]
 
     # ── Auto-inject simulation repair at priority -1 (runs FIRST) ────────────
     # Injected before existing repairs so it runs before reroute_net clears
