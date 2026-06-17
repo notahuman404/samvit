@@ -197,7 +197,7 @@ def run(state: DesignState) -> StageResult:
         issues=issues,
         metrics={
             "power_draw_mw":    total_power_mw,
-            "battery_life_h":   battery_life_h,
+            "battery_life_h":   safe_battery_h,   # use sanitized value — raw may be Infinity
             "total_draw_ma":    total_draw_ma,
         },
         duration=time.monotonic() - t0,
