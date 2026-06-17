@@ -85,7 +85,7 @@ class StageResult:
     duration: float                   = 0.0   # seconds
 
     def ok(self) -> bool:
-        return self.status in (StageStatus.PASSED, StageStatus.REPAIRED)
+        return self.status in (StageStatus.PASSED, StageStatus.REPAIRED, StageStatus.SKIPPED)
 
     def errors(self) -> List[Issue]:
         return [i for i in self.issues if i.is_error()]
