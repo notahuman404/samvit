@@ -183,6 +183,14 @@ def run(state: DesignState) -> StageResult:
     all_issues += _check_component_overlap(layout.placed, rules.min_clearance)
     all_issues += _check_trace_clearance(layout.traces, rules)
 
+    if not layout.placed:
+        all_issues.append(Issue(
+            code="DRC_EMPTY_BOARD",
+            severity=Severity.ERROR,
+            message="No components placed on board. Design is empty.",
+            source="drc",
+        ))
+
     errors   = [i for i in all_issues if i.is_error()]
     is_clean = len(errors) == 0
 

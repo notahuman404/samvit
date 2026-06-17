@@ -52,7 +52,9 @@ def _sim_voltage_stability(
 
     if not regulators:
         issues.append(Issue("SIM_NO_REGULATOR", Severity.ERROR,
-                            "No power regulator found — cannot simulate voltage stability.", "simulation"))
+                            "No power regulator found — cannot simulate voltage stability. "
+                            "ROOT CAUSE: Missing POWER/LDO/Buck-Boost component in selected BOM. "
+                            "REPAIR: Use 'add_component' for 'power_management' subsystem.", "simulation"))
         return 0.3, issues
 
     total_capacity_ma = sum(r.current_ma for r in regulators)
@@ -127,7 +129,9 @@ def _sim_signal_integrity(
         issues.append(Issue(
             code="SIM_NO_PULLUP",
             severity=Severity.WARNING,
-            message="No resistors in BOM — I2C/SPI pull-up resistors may be missing.",
+            message="No resistors in BOM — I2C/SPI pull-up resistors may be missing. "
+                    "ROOT CAUSE: Missing PASSIVE components. "
+                    "REPAIR: Use 'add_component' to add 4.7k pull-up resistors to I2C lines.",
             source="simulation",
         ))
 
