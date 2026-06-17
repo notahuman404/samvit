@@ -86,17 +86,23 @@ class GeminiModelManager:
 
     # ── Model rosters ────────────────────────────────────────────────────────
     HEAVY_MODELS: List[str] = [
-        "gemini-2.5-pro-preview-06-05",
-        "gemini-2.5-flash",
+        "gemini-3-flash-preview",      # heavy rank 1 — Gemini 3 Flash (5 RPM / 20 RPD)
+        "gemini-2.5-flash",            # heavy rank 2 — Gemini 2.5 Flash (5 RPM / 20 RPD)
     ]
     MEDIUM_MODELS: List[str] = [
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash-lite",
+        "gemini-3.1-flash-lite-preview", # medium rank 1 — Gemini 3.1 Flash Lite (15 RPM / 500 RPD)
+        "gemini-2.5-flash-lite",         # medium rank 2 — Gemini 2.5 Flash Lite (10 RPM / 250K TPM)
     ]
     LIGHT_MODELS: List[str] = [
-        "gemma-3-27b-it",
-        "gemma-3-12b-it",
-        "gemma-3-4b-it",
+        # Gemma 4 (via Gemini API)
+        "gemma-4-31b-it",              # light rank 1 — Gemma 4 31B Dense (15 RPM / 1.5K RPD)
+        "gemma-4-27b-it",              # light rank 2 — Gemma 4 26B MoE A4B (15 RPM / 1.5K RPD)
+        # Gemma 3 (via Gemini API)
+        "gemma-3-27b-it",              # light rank 3 — Gemma 3 27B (30 RPM / 14.4K RPD)
+        "gemma-3-12b-it",              # light rank 4 — Gemma 3 12B (30 RPM / 14.4K RPD)
+        "gemma-3-4b-it",               # light rank 5 — Gemma 3 4B (30 RPM / 14.4K RPD)
+        "gemma-3-2b-it",               # light rank 6 — Gemma 3 2B (30 RPM / 14.4K RPD)
+        "gemma-3-1b-it",               # light rank 7 — Gemma 3 1B (30 RPM / 14.4K RPD)
     ]
 
     TIER_MAP: Dict[str, List[str]] = {
