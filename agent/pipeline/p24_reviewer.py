@@ -181,7 +181,7 @@ def _build_prompt(state: DesignState) -> str:
             (thr.data.get("hotspots", [])[:5] if thr else []), indent=2
         ),
         power_detail=json.dumps(
-            {k: v for k, v in (pwr.data.items() if pwr else {}).items()
+            {k: v for k, v in (pwr.data if pwr else {}).items()
              if k != "per_rail"}, indent=2
         ) if pwr else "(not run)",
         sc_detail=_issues(sc, "sc_errors"),
