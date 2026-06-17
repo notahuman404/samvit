@@ -29,6 +29,31 @@ from agent.core.models import (
 # PartSelectionEngine bridge
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Maps generic architecture categories → specific DB category names
+_CATEGORY_DB_ALIASES: Dict[str, List[str]] = {
+    "POWER":      ["Charger IC", "Buck-Boost", "Boost Converter", "LDO", "POWER"],
+    "PROTECTION": ["Diode", "MOSFET", "PROTECTION"],
+    "Battery":    ["Battery"],
+    "MCU":        ["MCU", "Microcontroller"],
+    "SBC":        ["SBC"],
+    "MEMORY":     ["Flash", "Storage", "MEMORY"],
+    "SENSOR":     ["Depth Sensor", "ToF Sensor", "LiDAR", "Camera", "IMU",
+                   "Barometer", "Microphone", "SENSOR"],
+    "ACTUATOR":   ["Actuator", "Haptic Driver", "PWM Driver", "ACTUATOR"],
+    "COMMS":      ["BT Module", "BLE SoC", "LoRa", "LTE Module", "COMMS"],
+    "AUDIO":      ["Audio Amp", "Mic Amp", "Microphone", "AUDIO"],
+    "DISPLAY":    ["Display", "LED", "DISPLAY"],
+    "INTERFACE":  ["Level Shifter", "IO Expander", "Buffer", "Connector", "INTERFACE"],
+    "PASSIVE":    ["Capacitor", "Resistor", "Diode", "MOSFET", "Connector", "PASSIVE"],
+}
+
+
+def _expand_category(category: str) -> List[str]:
+    """Return DB-specific category names for a generic architecture category."""
+    aliases = _CATEGORY_DB_ALIASES.get(category, [])
+    return aliases if aliases else [category]
+
+
 def _select_via_engine(
     category: str,
     voltage_min: float,
@@ -61,13 +86,21 @@ def _select_via_engine(
             max_cost_usd=budget_usd,
         )
 
-        # select_best_part is async. asyncio.run() raises RuntimeError when an event
-        # loop is already running (the orchestrator is async), so we run it in a
-        # worker thread that owns a fresh event loop instead.
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            best = pool.submit(asyncio.run, engine.select_best_part(reqs)).result(timeout=30)
-        return best.part_number if best else None
+        # Expand generic category to DB-specific names and try each
+        for db_cat in _expand_category(category):
+            _reqs = ComponentRequirements(
+                category=db_cat,
+                voltage_min=voltage_min if voltage_min > 0 else None,
+                voltage_max=voltage_max if voltage_max > 0 else None,
+                current_min_ma=current_ma if current_ma > 0 else None,
+                max_cost_usd=budget_usd,
+            )
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                best = pool.submit(asyncio.run, engine.select_best_part(_reqs)).result(timeout=30)
+            if best:
+                return best.part_number
+        return None
 
     except Exception:
         return None
@@ -110,10 +143,10 @@ def run(state: DesignState) -> StageResult:
             duration=time.monotonic() - t0,
         )
 
+    # p07 stores candidates in stage_results (state.stage_data is always None)
+    _p07 = state.stage_results.get("p07_component_search")
     candidates_data: Dict[str, List[Dict[str, Any]]] = (
-        state.stage_data.get("p07_component_search", {}).get("candidates", {})
-        if hasattr(state, "stage_data") and state.stage_data
-        else {}
+        _p07.data.get("candidates", {}) if _p07 else {}
     )
 
     budget_usd: Optional[float] = getattr(state.requirements, "budget_usd", None) if state.requirements else None
