@@ -301,6 +301,14 @@ async def run_async(state: DesignState, gemini_manager: Any) -> StageResult:
                 detail={"reason": "Simulation failures — power rail may be undersized"},
                 priority=1,
             ))
+        if m.estimated_battery_h >= 87600:
+            repairs.append(RepairInstruction(
+                target_stage="p05_datasheet",
+                action="adjust_value",
+                component="all",
+                detail={"reason": "Unrealistic battery life — verify component current draw specs in datasheets"},
+                priority=1,
+            ))
         review = ReviewReport(
             passed=False,
             summary="Heuristic review (Gemini unavailable). Multiple issues detected.",

@@ -278,7 +278,7 @@ async def _fix_loop(
 
         # ── Step 3: Local Validation (fast, stage-specific) ───────────────────
         log.info("  🔍  STEP 3 — Local Validation")
-        _run_locally_affected(state, stages_to_rerun)
+        self._run_locally_affected(state, stages_to_rerun)
 
         # ── Step 4: Full Validation (ERC → DRC → Sim → Power → Thermal) ──────
         log.info("  🧪  STEP 4 — Full Validation")
@@ -297,27 +297,7 @@ async def _fix_loop(
     return False
 
 
-def _run_locally_affected(state: DesignState, stages_to_rerun: List[str]) -> None:
-    """Re-run only the stages that were dirtied by the repair."""
-    stage_fns = {
-        "p09_compatibility":    lambda: _run("p09_compatibility", p09_compatibility.run, state),
-        "p10_schematic_graph":  lambda: _run("p10_schematic_graph", p10_schematic_graph.run, state),
-        "p11_schematic_gen":    lambda: _run("p11_schematic_gen", p11_schematic_gen.run, state),
-        "p12_footprint":        lambda: _run("p12_footprint", p12_footprint.run, state),
-        "p13_placement":        lambda: _run("p13_placement", p13_placement.run, state),
-        "p14_routing":          lambda: _run("p14_routing", p14_routing.run, state),
-        "p17_drc":              lambda: _run("p17_drc", p17_drc.run, state),
-        "p20_short_circuit":    lambda: _run("p20_short_circuit", p20_short_circuit.run, state),
-    }
-    ordered = [
-        "p09_compatibility", "p10_schematic_graph", "p11_schematic_gen",
-        "p12_footprint", "p13_placement", "p14_routing",
-        "p17_drc", "p20_short_circuit",
-    ]
-    for stage in ordered:
-        if stage in stages_to_rerun and stage in stage_fns:
-            result = stage_fns[stage]()
-            state.record(result)
+
 
 
 def _full_validate(state: DesignState) -> None:
@@ -386,6 +366,34 @@ class SamvitOrchestrator:
             format="%(asctime)s  %(message)s",
             datefmt="%H:%M:%S",
         )
+
+    # ──────────────────────────────────────────────────────────────────────
+
+    def _run_locally_affected(self, state: DesignState, stages_to_rerun: List[str]) -> None:
+        """Re-run only the stages that were dirtied by the repair."""
+        stage_fns = {
+            "p05_datasheet":        lambda: _run_async("p05_datasheet", p05_datasheet.run_async(state, self.gemini)),
+            "p08_part_selection":   lambda: _run("p08_part_selection", p08_part_selection.run, state),
+            "p09_compatibility":    lambda: _run("p09_compatibility", p09_compatibility.run, state),
+            "p10_schematic_graph":  lambda: _run("p10_schematic_graph", p10_schematic_graph.run, state),
+            "p11_schematic_gen":    lambda: _run("p11_schematic_gen", p11_schematic_gen.run, state),
+            "p12_footprint":        lambda: _run("p12_footprint", p12_footprint.run, state),
+            "p13_placement":        lambda: _run("p13_placement", p13_placement.run, state),
+            "p14_routing":          lambda: _run("p14_routing", p14_routing.run, state),
+            "p17_drc":              lambda: _run("p17_drc", p17_drc.run, state),
+            "p18_power":            lambda: _run("p18_power", p18_power.run, state),
+            "p20_short_circuit":    lambda: _run("p20_short_circuit", p20_short_circuit.run, state),
+        }
+        ordered = [
+            "p05_datasheet", "p08_part_selection", "p09_compatibility",
+            "p10_schematic_graph", "p11_schematic_gen",
+            "p12_footprint", "p13_placement", "p14_routing",
+            "p17_drc", "p18_power", "p20_short_circuit",
+        ]
+        for stage in ordered:
+            if stage in stages_to_rerun and stage in stage_fns:
+                result = stage_fns[stage]()
+                state.record(result)
 
     # ──────────────────────────────────────────────────────────────────────
 

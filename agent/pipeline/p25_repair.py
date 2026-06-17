@@ -160,10 +160,20 @@ def _repair_adjust_value(
     state: DesignState,
     instr: RepairInstruction,
 ) -> tuple[bool, str, Set[str]]:
-    """Adjust a design rule value (trace width, clearance, etc.)."""
+    """Adjust a design rule value or re-trigger datasheet parsing."""
     detail = instr.detail
     field  = detail.get("field", "")
     value  = detail.get("value")
+
+    # Special case: re-trigger datasheet parsing for all components
+    if instr.target_stage == "p05_datasheet" and instr.component == "all":
+        downstream = {
+            "p05_datasheet", "p08_part_selection", "p09_compatibility",
+            "p18_power", "p21_simulation", "p23_metrics",
+        }
+        for stage in downstream:
+            state.stage_results.pop(stage, None)
+        return True, "Invalidated component data for re-parsing.", downstream
 
     if not field or value is None:
         return False, "adjust_value requires 'field' and 'value' in detail.", set()

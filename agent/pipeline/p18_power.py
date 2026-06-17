@@ -54,15 +54,9 @@ def _estimate_battery_life(
     efficiency: float = 0.85,
 ) -> float:
     """Return estimated battery life in hours."""
-    # Cap battery life at 10 years (87600h) to avoid Infinity issues
-    # and provide a more realistic upper bound for low-power designs.
-    MAX_LIFE_H = 87600.0
-
     if total_draw_ma <= 0:
-        return MAX_LIFE_H
-
-    life = (capacity_mah * efficiency) / total_draw_ma
-    return min(life, MAX_LIFE_H)
+        return float("inf")
+    return (capacity_mah * efficiency) / total_draw_ma
 
 
 def _find_battery_capacity(components: Dict[str, Component]) -> float:
@@ -157,8 +151,22 @@ def run(state: DesignState) -> StageResult:
                 source="power",
             ))
 
-    # Battery life warning
-    if battery_life_h < 2.0:
+    # Battery life validation
+    import math
+    if not math.isfinite(battery_life_h) or battery_life_h > 87600:
+        # If battery life is Infinity or > 10 years, something is wrong with the data
+        issues.append(Issue(
+            code="PWR_UNREALISTIC_BATTERY",
+            severity=Severity.ERROR,
+            message=(
+                f"Estimated battery life ({battery_life_h}) is unrealistic. "
+                "This usually means total current draw is zero or negative, "
+                "or component current specs were parsed incorrectly. "
+                "Check part selection and datasheet parameters."
+            ),
+            source="power",
+        ))
+    elif battery_life_h < 2.0:
         issues.append(Issue(
             code="PWR_SHORT_BATTERY",
             severity=Severity.WARNING,
@@ -169,6 +177,11 @@ def run(state: DesignState) -> StageResult:
             source="power",
         ))
 
+    # Sanitize battery_life_h for the data payload to prevent JSON issues
+    safe_battery_h = battery_life_h
+    if not math.isfinite(battery_life_h):
+        safe_battery_h = 87600.0
+
     has_errors = any(i.is_error() for i in issues)
     return StageResult(
         stage="p18_power",
@@ -177,7 +190,7 @@ def run(state: DesignState) -> StageResult:
             "total_power_mw":  round(total_power_mw, 2),
             "total_draw_ma":   round(total_draw_ma, 2),
             "battery_cap_mah": battery_cap_mah,
-            "battery_life_h":  round(battery_life_h, 2),
+            "battery_life_h":  round(safe_battery_h, 2),
             "per_rail":        {r.name: {"draw_ma": r.total_draw_ma, "power_mw": r.power_mw}
                                 for r in rails.values()},
         },
