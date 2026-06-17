@@ -171,7 +171,7 @@ def _build_prompt(state: DesignState) -> str:
         erc_errors=m.erc_errors if m else "?",
         drc_errors=m.drc_errors if m else "?",
         power_mw=m.power_draw_mw if m else "?",
-        battery_h=m.estimated_battery_h if m else "?",
+        battery_h=("N/A (unreliable)" if m is None or not __import__('math').isfinite(m.estimated_battery_h) else f"{m.estimated_battery_h:.1f}"),
         max_temp_c=m.max_temp_c if m else "?",
         sim_pass_rate=m.sim_pass_rate if m else "?",
         erc_detail=_issues(erc, "erc_errors"),
@@ -301,7 +301,7 @@ async def run_async(state: DesignState, gemini_manager: Any) -> StageResult:
                 detail={"reason": "Simulation failures — power rail may be undersized"},
                 priority=1,
             ))
-        if m.estimated_battery_h >= 87600:
+        if __import__('math').isfinite(m.estimated_battery_h) and m.estimated_battery_h >= 87600:
             repairs.append(RepairInstruction(
                 target_stage="p05_datasheet",
                 action="adjust_value",
