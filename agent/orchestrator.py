@@ -236,6 +236,7 @@ async def _fix_loop(
     gemini: GeminiModelManager,
     checkpoint: CheckpointManager,
     max_fix_rounds: int = 5,
+    orchestrator: Any = None,
 ) -> bool:
     """
     Run the repair cycle until the design is clean or max_fix_rounds exhausted.
@@ -278,7 +279,8 @@ async def _fix_loop(
 
         # ── Step 3: Local Validation (fast, stage-specific) ───────────────────
         log.info("  🔍  STEP 3 — Local Validation")
-        self._run_locally_affected(state, stages_to_rerun)
+        if orchestrator is not None:
+            await orchestrator._run_locally_affected(state, stages_to_rerun)
 
         # ── Step 4: Full Validation (ERC → DRC → Sim → Power → Thermal) ──────
         log.info("  🧪  STEP 4 — Full Validation")
@@ -369,8 +371,9 @@ class SamvitOrchestrator:
 
     # ──────────────────────────────────────────────────────────────────────
 
-    def _run_locally_affected(self, state: DesignState, stages_to_rerun: List[str]) -> None:
+    async def _run_locally_affected(self, state: DesignState, stages_to_rerun: List[str]) -> None:
         """Re-run only the stages that were dirtied by the repair."""
+        async_stages = {"p05_datasheet"}
         stage_fns = {
             "p05_datasheet":        lambda: _run_async("p05_datasheet", p05_datasheet.run_async(state, self.gemini)),
             "p08_part_selection":   lambda: _run("p08_part_selection", p08_part_selection.run, state),
@@ -392,7 +395,8 @@ class SamvitOrchestrator:
         ]
         for stage in ordered:
             if stage in stages_to_rerun and stage in stage_fns:
-                result = stage_fns[stage]()
+                fn_result = stage_fns[stage]()
+                result = await fn_result if stage in async_stages else fn_result
                 state.record(result)
 
     # ──────────────────────────────────────────────────────────────────────
@@ -526,7 +530,7 @@ class SamvitOrchestrator:
 
             # Enter fix loop
             design_clean = await _fix_loop(
-                state, self.gemini, self.checkpoint, self.max_fix_rounds
+                state, self.gemini, self.checkpoint, self.max_fix_rounds, self
             )
 
             if design_clean:
