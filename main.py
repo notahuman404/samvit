@@ -86,6 +86,25 @@ DEMO_REQUIREMENTS = {
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI
 # ──────────────────────────────────────────────────────────────────────────────
+def resolve_api_keys() -> list[str]:
+    keys = []
+    itr = 0
+    base = "GEMINI_API_KEY"
+    while True:
+        if itr == 0 :
+            key = os.getenv(base)
+            if key:
+                keys.append(key)
+            itr+=1
+            continue
+        
+        key = os.getenv(f"{base}_{itr}")
+        if key:
+            keys.append(key)
+            itr+=1
+        else: break
+    return keys
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -101,6 +120,11 @@ def parse_args() -> argparse.Namespace:
         "--req", "--requirements-file",
         dest="req_file",
         help="Path to a JSON file with structured requirements",
+    )
+    p.add_argument(
+        "--requirement-path",
+        dest="req_path",
+        help="Path to a plain-text requirements file; content used as-is as the requirements string",
     )
     p.add_argument(
         "--overrides",
@@ -125,8 +149,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-iter",
         type=int,
-        default=int(os.environ.get("SAMVIT_MAX_ITER", "8")),
-        help="Maximum main loop iterations (default: 8)",
+        default=int(os.environ.get("SAMVIT_MAX_ITER", "12")),
+        help="Maximum main loop iterations (default: 12)",
     )
     p.add_argument(
         "--max-fix",
@@ -143,24 +167,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def resolve_api_keys() -> list[str]:
-    keys = []
-    itr = 0
-    base = "GEMINI_API_KEY"
-    while True:
-        if itr == 0 :
-            key = os.getenv(base)
-            if key:
-                keys.append(key)
-            itr+=1
-            continue
-        
-        key = os.getenv(f"{base}_{itr}")
-        if key:
-            keys.append(key)
-            itr+=1
-        else: break
-    return keys
 
         
 async def _main() -> None:
@@ -186,6 +192,11 @@ async def _main() -> None:
         with open(args.req_file, encoding="utf-8") as f:
             requirements_input = json.load(f)
         log.info("Loaded requirements from %s", args.req_file)
+    elif args.req_path:
+        with open(args.req_path, encoding="utf-8") as f:
+            requirements_input = f.read()
+        log.info("Loaded requirements from %s", args.req_path)
+
     elif args.requirements:
         requirements_input = args.requirements
     else:

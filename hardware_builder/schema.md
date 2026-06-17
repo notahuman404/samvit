@@ -1,47 +1,80 @@
 # Samvit — Hardware Spec
 
-## What It Is
-A wearable sensory substitution device that converts real-time visual/spatial environment data into non-visual feedback (haptic or audio), enabling independent physical navigation for visually impaired users.
+## What You're Building
+
+A body-worn device that takes in live depth data from two sensors, builds a spatial heatmap of the environment, and communicates it to the user through a 144-motor vibration grid and audio tones — replacing vision for navigation in real time.
 
 ---
 
-## Input
-| Source | Data |
-|---|---|
-| Camera / depth sensor | Real-time environmental feed |
-| Software layer | Destination coordinates from voice AI |
+## Sensors
 
-## Processing
-- Generates spatial heatmap from camera/depth input
-- Encodes obstacle positions, paths, and destination direction into feedback signals
-
-## Output
-| Feedback Type | Encodes |
-|---|---|
-| Vibration pattern | Obstacle proximity / direction |
-| Audio tone | Path guidance / destination proximity |
+**Use: Intel RealSense D435i (x2)**
+- One forward-facing, one angled upward ~30°
+- Forward sensor covers ground to chest height
+- Angled sensor covers chest to top of user's head
+- Both connect via USB to the processing unit
+- Python library: `pyrealsense2` — gives depth frames directly, well documented, widely used
 
 ---
 
-## Constraints
-- Must run in real-time (low latency)
-- Wearable form factor — lightweight, body-mounted
-- Must integrate with Layer 1 software via a defined interface
-- Works outdoors and indoors
-- No vision required to operate
+## Processing Unit
+
+**Use: Raspberry Pi 4 (4GB)**
+- Runs Python natively
+- Has enough USB ports for both RealSense sensors
+- Supports PWM control, I2C, and WiFi all on one board
+- This is where the heatmap processing and all signal logic runs
+- No additional compute needed
 
 ---
 
-## Interface with Software Layer
-Receives destination coordinates from the Jarvis voice engine → translates into directional feedback for the user in real-time.
+## Vibration Grid (144 Motors)
+
+**Motors: ERM (Eccentric Rotating Mass) coin vibration motors**
+- Small, flat, lightweight — suitable for body-worn use
+- Arranged in a 12×12 grid worn on the torso (front or vest-style)
+- The grid maps directly to the heatmap — each motor corresponds to a zone in the user's environment
+- Closer obstacle = stronger vibration in that motor's position on the grid
+
+**Driver: PCA9685 PWM Driver boards (x9, chained via I2C)**
+- Each PCA9685 drives 16 motors
+- 9 boards chained together = 144 motors
+- All controlled over a single I2C connection from the Raspberry Pi
+- Python library: `adafruit-circuitpython-pca9685` — lets you set any motor's intensity in one line
 
 ---
 
-## Success Criteria
-- User can navigate from point A to point B independently without sighted assistance
-- Obstacle detection is reliable enough to avoid collisions
-- Feedback is learnable within a short training period
-- Hardware stays functional during a full transit journey (battery + durability)
+## Audio Output
 
-## Note
-Don't build the software layer, as soon as you complete the hardware input and output just save the files and then you will be called again when the software layer has been built. 
+**Use: Any small speaker via MAX98357A I2S amplifier**
+- Handles directional audio tones for destination guidance
+- Connects directly to Raspberry Pi GPIO
+- Python library: `sounddevice` — generate and play tones programmatically in real time
+
+---
+
+## Communication with Software Layer
+
+**Use: Raspberry Pi's built-in WiFi**
+- The Jarvis voice AI sends destination coordinates over local WiFi to the Pi
+- No extra hardware needed — Pi handles this natively
+- On the software side, a simple socket connection receives the coordinates
+
+---
+
+## What the Hardware Designer Does Not Need to Worry About
+
+- How the heatmap is computed (software side)
+- How destination coordinates are generated (voice AI side)
+- Audio content or tone logic (software side)
+
+The designer's job is: sensors feed into the Pi, Pi drives the motor grid and speaker. Everything else is software.
+
+---
+
+## Success Bar
+
+- Full 144-motor grid responds to environment in under 50ms
+- Both sensor zones (lower + upper) detected and mapped independently
+- User can distinguish obstacle direction and height from vibration position alone
+- Device runs for 4+ hours on battery

@@ -1,0 +1,13 @@
+01:43:23  Loaded requirements from /workspaces/samvit/hardware_builder/schema.md
+01:43:23  Loaded 6 Gemini API key(s).
+01:43:23  GeminiModelManager ready — 6 key(s), default_tier=heavy
+01:43:23  ╔══════════════════════════════════════════════════════════╗
+01:43:23  ║          SAMVIT AUTONOMOUS HARDWARE PIPELINE             ║
+01:43:23  ╚══════════════════════════════════════════════════════════╝
+01:43:23  
+📌  PHASE 0 — REQUIREMENTS
+01:43:23    ▶ Running p01_requirements …
+01:43:23    ✅ p01_requirements — 0.00s  (E:0 W:0)
+01:43:23  
+🧠  PHASE 1 — GLOBAL ARCHITECTURE PLAN  (Gemini call #1)
+01:43:23    ▶ Running p03_architecture …
