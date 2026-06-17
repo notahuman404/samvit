@@ -171,7 +171,7 @@ def _build_prompt(state: DesignState) -> str:
         erc_errors=m.erc_errors if m else "?",
         drc_errors=m.drc_errors if m else "?",
         power_mw=m.power_draw_mw if m else "?",
-        battery_h=m.estimated_battery_h if m else "?",
+        battery_h=("N/A (unreliable)" if m is None or not __import__('math').isfinite(m.estimated_battery_h) else f"{m.estimated_battery_h:.1f}"),
         max_temp_c=m.max_temp_c if m else "?",
         sim_pass_rate=m.sim_pass_rate if m else "?",
         erc_detail=_issues(erc, "erc_errors"),
@@ -286,12 +286,24 @@ async def run_async(state: DesignState, gemini_manager: Any) -> StageResult:
                 priority=1,
             ))
         if m.drc_errors > 0:
+            # reroute_net always has an effect; adjust_value supplies the required field+value
             repairs.append(RepairInstruction(
-                target_stage="p13_placement",
+                target_stage="p14_routing",
+                action="reroute_net",
+                component="all",
+                detail={"reason": "DRC clearance/spacing errors — force full re-route"},
+                priority=2,
+            ))
+            repairs.append(RepairInstruction(
+                target_stage="p15_rules",
                 action="adjust_value",
                 component="all",
-                detail={"reason": "DRC errors detected — spacing/clearance issue"},
-                priority=2,
+                detail={
+                    "field": "min_clearance_mm",
+                    "value": 0.3,
+                    "reason": "Increase clearance to reduce DRC violations",
+                },
+                priority=3,
             ))
         if m.sim_pass_rate < 0.75:
             repairs.append(RepairInstruction(
@@ -301,7 +313,7 @@ async def run_async(state: DesignState, gemini_manager: Any) -> StageResult:
                 detail={"reason": "Simulation failures — power rail may be undersized"},
                 priority=1,
             ))
-        if m.estimated_battery_h >= 87600:
+        if __import__('math').isfinite(m.estimated_battery_h) and m.estimated_battery_h >= 87600:
             repairs.append(RepairInstruction(
                 target_stage="p05_datasheet",
                 action="adjust_value",

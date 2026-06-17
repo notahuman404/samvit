@@ -84,12 +84,37 @@ def _repair_replace_part(
                 break
 
     if new_comp is None:
+        # Fallback: ask PartSelectionEngine for the best available real part
+        # by category so the repair doesn't silently fail when Gemini suggests
+        # a part that isn't seeded in samvit_parts.db.
+        try:
+            import os as _os, sys as _sys, asyncio as _asyncio
+            import concurrent.futures as _cf
+            _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..", ".."))
+            if _root not in _sys.path:
+                _sys.path.insert(0, _root)
+            from hardware_builder.part_selection_engine import (  # type: ignore
+                PartSelectionEngine, ComponentRequirements,
+            )
+            _db = _os.path.join(_root, "hardware_builder", "samvit_parts.db")
+            _engine = PartSelectionEngine(_db)
+            _cat = detail.get("category", "POWER")
+            _budget = getattr(getattr(state, "requirements", None), "budget_usd", None)
+            _reqs = ComponentRequirements(category=_cat, max_cost_usd=_budget)
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                _best = _pool.submit(_asyncio.run, _engine.select_best_part(_reqs)).result(timeout=30)
+            if _best and _best.part_number in state.components:
+                new_comp = state.components[_best.part_number]
+                new_part = _best.part_number
+        except Exception:
+            pass
+
+    if new_comp is None:
         return (
             False,
-            f"Replacement part '{new_part}' not found in component database.",
+            f"Replacement part '{new_part}' not found in component database or PartSelectionEngine.",
             set(),
         )
-
     # Apply the swap
     old_pn = selected[matched_sub]
     selected[matched_sub] = new_part
@@ -121,21 +146,49 @@ def _repair_add_component(
 
     # Create a minimal component record if not already in DB
     if new_part and new_part not in state.components:
-        state.components[new_part] = Component(
-            part_number=new_part,
-            manufacturer="Generic",
-            category=category,
-            description=detail.get("reason", f"Added by repair agent: {new_part}"),
-            voltage_min=0.0,
-            voltage_max=5.0,
-            current_ma=1.0,
-            package=detail.get("package", "0402"),
-            footprint=detail.get("footprint", "Resistor_SMD:R_0402_1005Metric"),
-            cost_usd=float(detail.get("cost_usd", 0.10)),
-            notes=detail.get("reason", ""),
-            confidence=0.7,
-        )
+        # Try to find a real part in the DB first, rather than creating a
+        # ghost component with hardcoded specs that corrupt DRC + simulation.
+        _real_found = False
+        try:
+            import os as _os, sys as _sys, asyncio as _asyncio
+            import concurrent.futures as _cf
+            _root = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..", ".."))
+            if _root not in _sys.path:
+                _sys.path.insert(0, _root)
+            from hardware_builder.part_selection_engine import (  # type: ignore
+                PartSelectionEngine, ComponentRequirements,
+            )
+            _db = _os.path.join(_root, "hardware_builder", "samvit_parts.db")
+            _engine = PartSelectionEngine(_db)
+            _budget = getattr(getattr(state, "requirements", None), "budget_usd", None)
+            _reqs = ComponentRequirements(category=category, max_cost_usd=_budget)
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                _best = _pool.submit(_asyncio.run, _engine.select_best_part(_reqs)).result(timeout=30)
+            if _best and _best.part_number in state.components:
+                # Redirect to the real DB part instead of a ghost
+                new_part = _best.part_number
+                _real_found = True
+        except Exception:
+            pass
 
+        if not _real_found:
+            # Last resort: create a minimal component. Use detail for specs if
+            # provided; otherwise default to safe conservative values so the
+            # simulation and DRC are not corrupted by a 1mA resistor footprint.
+            state.components[new_part] = Component(
+                part_number=new_part,
+                manufacturer="Generic",
+                category=category,
+                description=detail.get("reason", f"Added by repair agent: {new_part}"),
+                voltage_min=float(detail.get("voltage_min", 0.0)),
+                voltage_max=float(detail.get("voltage_max", 3.3)),
+                current_ma=float(detail.get("current_ma", 100.0)),
+                package=detail.get("package", "SOT-23"),
+                footprint=detail.get("footprint", "Package_TO_SOT_SMD:SOT-23"),
+                cost_usd=float(detail.get("cost_usd", 0.50)),
+                notes=detail.get("reason", ""),
+                confidence=0.5,
+            )
     # Add to selected BOM
     sel_result = state.stage_results.get("p08_part_selection")
     if sel_result and new_part:
