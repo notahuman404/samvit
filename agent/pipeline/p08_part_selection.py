@@ -61,8 +61,12 @@ def _select_via_engine(
             max_cost_usd=budget_usd,
         )
 
-        # select_best_part is async; run it in a temporary event loop
-        best = asyncio.run(engine.select_best_part(reqs))
+        # select_best_part is async. asyncio.run() raises RuntimeError when an event
+        # loop is already running (the orchestrator is async), so we run it in a
+        # worker thread that owns a fresh event loop instead.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            best = pool.submit(asyncio.run, engine.select_best_part(reqs)).result(timeout=30)
         return best.part_number if best else None
 
     except Exception:
