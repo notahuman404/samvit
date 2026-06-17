@@ -243,6 +243,11 @@ def run(state: DesignState) -> StageResult:
     if hasattr(state, "stage_data") and state.stage_data:
         selected_pn = state.stage_data.get("p08_part_selection", {}).get("selected", {})
 
+    if not selected_pn:
+        sel_result = state.stage_results.get("p08_part_selection")
+        if sel_result:
+            selected_pn = sel_result.data.get("selected", {})
+
     selected: Dict[str, Component] = {}
     for sub_name, pn in selected_pn.items():
         if pn in state.components:

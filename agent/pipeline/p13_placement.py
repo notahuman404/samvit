@@ -57,8 +57,8 @@ def _snap(v: float, grid: float = _GRID) -> float:
 def _place_components(
     selected_map: Dict[str, str],      # subsystem_name → part_number
     components: Dict[str, "Component"],
-    board_w: float = 100.0,
-    board_h: float = 80.0,
+    board_w: float,
+    board_h: float,
 ) -> List[PlacedComponent]:
     """
     Assign positions using zone clustering + offset within each zone.
@@ -130,14 +130,15 @@ def run(state: DesignState) -> StageResult:
         )
 
     selected_map: Dict[str, str] = sel_result.data.get("selected", {})
-    rules = state.rules or DesignRules()
-
-    placed = _place_components(selected_map, state.components)
-    board_area = rules.board_thickness   # re-use model field as placeholder; real area below
-    board_area = 100.0 * 80.0           # mm²
 
     if state.layout is None:
         state.layout = PCBLayout(board_width=100.0, board_height=80.0)
+
+    board_w = state.layout.board_width
+    board_h = state.layout.board_height
+    placed = _place_components(selected_map, state.components, board_w, board_h)
+    board_area = board_w * board_h
+
     state.layout.placed = placed
 
     return StageResult(

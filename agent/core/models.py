@@ -361,6 +361,7 @@ class DesignState:
     metrics:        Optional[DesignMetrics]         = None
     review:         Optional[ReviewReport]          = None
     stage_results:  Dict[str, StageResult]          = field(default_factory=dict)
+    stage_data:     Dict[str, Any]                   = field(default_factory=dict)
     iteration:      int                             = 0
     checkpoint_dir: str                             = "checkpoint"
 
