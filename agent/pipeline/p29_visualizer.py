@@ -25,9 +25,16 @@ _COL = 60   # column width for text reports
 
 
 def _bar(label: str, value: float, max_val: float, width: int = 20) -> str:
-    filled = int((value / max_val) * width) if max_val > 0 else 0
-    bar    = "█" * min(filled, width) + "░" * max(0, width - filled)
-    return f"{label:<20} [{bar}] {value:.1f}/{max_val:.1f}"
+    import math
+    if max_val > 0 and math.isfinite(value):
+        filled = min(width, int((value / max_val) * width))
+    elif math.isinf(value) and value > 0:
+        filled = width  # clamp infinity to a full bar
+    else:
+        filled = 0
+    bar     = "█" * filled + "░" * max(0, width - filled)
+    val_str = f"{value:.1f}" if math.isfinite(value) else "inf"
+    return f"{label:<20} [{bar}] {val_str}/{max_val:.1f}"
 
 
 def render_pipeline_status(state: DesignState) -> str:
