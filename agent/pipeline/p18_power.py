@@ -54,9 +54,15 @@ def _estimate_battery_life(
     efficiency: float = 0.85,
 ) -> float:
     """Return estimated battery life in hours."""
+    # Cap battery life at 10 years (87600h) to avoid Infinity issues
+    # and provide a more realistic upper bound for low-power designs.
+    MAX_LIFE_H = 87600.0
+
     if total_draw_ma <= 0:
-        return float("inf")
-    return (capacity_mah * efficiency) / total_draw_ma
+        return MAX_LIFE_H
+
+    life = (capacity_mah * efficiency) / total_draw_ma
+    return min(life, MAX_LIFE_H)
 
 
 def _find_battery_capacity(components: Dict[str, Component]) -> float:

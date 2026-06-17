@@ -48,13 +48,13 @@ Fields to extract per component:
   category      : one of [MCU, SBC, POWER, SENSOR, ACTUATOR, COMMS, AUDIO,
                           DISPLAY, MEMORY, INTERFACE, PASSIVE, PROTECTION, OTHER]
   description   : one sentence max
-  voltage_min   : float (V)
-  voltage_max   : float (V)
-  current_ma    : float (mA, typical operating)
+  voltage_min   : float (V, must be a finite number, no Infinity)
+  voltage_max   : float (V, must be a finite number, no Infinity)
+  current_ma    : float (mA, typical operating, must be a finite number, no Infinity)
   package       : string (e.g. "QFN-32", "SOT-23")
   footprint     : string (KiCad footprint name if known, else package)
   cost_usd      : float (if mentioned)
-  notes         : string (any important design notes or caveats)
+  notes         : string (any important design notes or caveats, including battery capacity in mAh if applicable)
 
 === COMPONENT ENTRIES ===
 

@@ -57,9 +57,9 @@ Success criteria: {criteria}
    - role         : one-sentence description
    - category     : one of [MCU, SBC, POWER, SENSOR, ACTUATOR, COMMS, AUDIO,
                             DISPLAY, MEMORY, INTERFACE, PASSIVE, PROTECTION]
-   - voltage_min  : minimum supply voltage (V, float)
-   - voltage_max  : maximum supply voltage (V, float)
-   - current_ma   : estimated peak current draw (mA, float)
+   - voltage_min  : minimum supply voltage (V, float, must be finite)
+   - voltage_max  : maximum supply voltage (V, float, must be finite)
+   - current_ma   : estimated peak current draw (mA, float, must be finite)
    - interface    : primary bus this subsystem exposes (I2C, SPI, UART, USB, GPIO, PWM, …)
    - priority     : 1 = must-have, 2 = nice-to-have
    - notes        : any design constraints or special requirements

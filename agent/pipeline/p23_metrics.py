@@ -29,7 +29,15 @@ def run(state: DesignState) -> StageResult:
         r = state.stage_results.get(stage)
         if r is None:
             return default
-        return float(r.data.get(key, default))
+        val = r.data.get(key, default)
+        try:
+            fval = float(val)
+            import math
+            if not math.isfinite(fval):
+                return default
+            return fval
+        except (ValueError, TypeError):
+            return default
 
     def _iget(stage: str, key: str, default: int = 0) -> int:
         r = state.stage_results.get(stage)
