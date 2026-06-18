@@ -71,6 +71,19 @@ def run(state: DesignState) -> StageResult:
     pass_rate   = n_pass / n_total if n_total > 0 else 0.0
     fail_rate   = 1.0 - pass_rate
 
+    # Power validation as a convergence signal. power_ok mirrors p18_power's
+    # own pass/fail (any ERROR-severity power issue → not ok). If p18 has not
+    # run yet, treat as ok so we don't spuriously block. Also surface how far
+    # over the architecture power budget we are, to give the repair loop's
+    # improvement guard a gradient on power.
+    power_ok = pwr_result is None or pwr_result.status == StageStatus.PASSED
+    budget_mw = (state.architecture.power_budget_mw
+                 if state.architecture and state.architecture.power_budget_mw > 0
+                 else 0.0)
+    power_over_budget_mw = (
+        max(0.0, power_mw - budget_mw * 1.1) if budget_mw > 0 else 0.0
+    )
+
     metrics = DesignMetrics(
         pass_rate=round(pass_rate, 3),
         failure_rate=round(fail_rate, 3),
@@ -84,6 +97,8 @@ def run(state: DesignState) -> StageResult:
         board_area_mm2=round(board_area, 1),
         bom_cost_usd=round(bom_cost, 2),
         sim_pass_rate=round(sim_pass_rate, 3),
+        power_ok=power_ok,
+        power_over_budget_mw=round(power_over_budget_mw, 2),
         iteration=state.iteration,
     )
     state.metrics = metrics

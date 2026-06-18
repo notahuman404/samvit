@@ -319,6 +319,11 @@ class DesignMetrics:
     board_area_mm2:       float = 0.0
     bom_cost_usd:         float = 0.0
     sim_pass_rate:        float = 0.0
+    # Power validation (p18_power) as a first-class convergence signal.
+    # power_ok=False means p18 reported an error (e.g. PWR_OVER_BUDGET); the
+    # design must not be considered "clean" while this is False.
+    power_ok:             bool  = True
+    power_over_budget_mw: float = 0.0   # how far over the architecture budget (0 if within)
     iteration:            int   = 0
 
 

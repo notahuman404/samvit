@@ -245,6 +245,12 @@ def _design_score(m: Optional[Any]) -> float:
     score += max(0.0, m.max_temp_c - 85.0) * 2.0
     if math.isfinite(m.estimated_battery_h):
         score += max(0.0, 8.0 - m.estimated_battery_h)
+    # Power validation (p18) is a real convergence signal, not a free pass.
+    # Fixed penalty when over budget, plus a small per-mW gradient so the
+    # improvement guard can see the repair loop trimming power toward budget.
+    if not getattr(m, "power_ok", True):
+        score += 150.0
+        score += getattr(m, "power_over_budget_mw", 0.0) * 0.01
     return score
 
 
@@ -308,10 +314,12 @@ async def _fix_loop(
         # ── Save checkpoint after each fix round ──────────────────────────────
         _save_checkpoint(state, checkpoint, label=f"fix_round_{fix_round}")
 
-        # Check if design is now clean (incl. thermal within safe limit)
+        # Check if design is now clean (incl. thermal within safe limit and
+        # power within budget — a design over its power budget is NOT clean).
         m = state.metrics
         if (m and m.erc_errors == 0 and m.drc_errors == 0
-                and m.sim_pass_rate >= 0.75 and m.max_temp_c < 105.0):
+                and m.sim_pass_rate >= 0.75 and m.max_temp_c < 105.0
+                and getattr(m, "power_ok", True)):
             log.info("  ✅  Design passed all checks after fix round %d!", fix_round)
             return True
 
