@@ -8,9 +8,16 @@ Search order
   1. Offline DB (samvit_parts.db) — exact, deterministic, scored against
      hard constraints (voltage / current / cost).
   2. Real web search — if (and only if) the offline DB has no usable
-     match, this calls Gemini with the built-in Google Search grounding
-     tool ("google_search") and asks it to find one real, currently
-     existing component, citing a real source URL it actually retrieved.
+     match, an ordered chain of web providers is tried until one returns a
+     real candidate that satisfies the hard constraints:
+        a. DigiKey API     (only if DIGIKEY_CLIENT_ID + DIGIKEY_CLIENT_SECRET
+                            are set; otherwise skipped).
+        b. Datasheets.com  (only if DATASHEETS_API_KEY is set; a real
+                            component catalog search returning verified MPNs,
+                            manufacturers, datasheet URLs and parametric specs).
+        c. Gemini + Google Search grounding (only if GEMINI_API_KEY(_n) is
+                            set and the `google-genai` package is installed).
+     The first provider that yields a usable, in-spec candidate wins.
 
 There is no mocked/hardcoded online provider. If a real, verifiable match
 cannot be found — offline or online — `select_best_part` returns `None`.
@@ -19,17 +26,21 @@ the subsystem as genuinely unfilled (e.g. surface a SELECT_NO_PART issue,
 relax requirements, widen the offline DB, or add a manually-specified
 ghost component) rather than silently proceeding with a phantom part.
 
-New dependency
----------------
-  pip install google-genai
+Optional dependency
+-------------------
+  pip install google-genai     # only needed for the Gemini provider.
+  The DigiKey and Datasheets providers use the standard library only.
 
 Auth
 ----
-  Reuses whatever Gemini API keys are already configured for the rest of
-  the pipeline: the env var `GEMINI_API_KEY`, plus `GEMINI_API_KEY_1`,
-  `GEMINI_API_KEY_2`, ... (same convention as main.py's resolve_api_keys).
-  No new credentials are required. If no key is present, online search is
-  skipped (with a logged warning) and only the offline DB is used.
+  - Gemini: env var `GEMINI_API_KEY`, plus `GEMINI_API_KEY_1`,
+    `GEMINI_API_KEY_2`, ... (same convention as main.py's resolve_api_keys).
+  - Datasheets.com: env var `DATASHEETS_API_KEY` (a `Bearer` token used
+    against https://www.datasheets.com/api/v1/search).
+  - DigiKey: env vars `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET`.
+  Every provider self-skips (with a logged note) when its credential is
+  absent, so the engine degrades gracefully to whatever is configured —
+  down to offline-DB-only when nothing is.
 """
 
 import sqlite3
@@ -40,6 +51,8 @@ import os
 import re
 import time
 import asyncio
+import urllib.request
+import urllib.parse
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -150,6 +163,8 @@ def parse_current_ma(c_str: str) -> float:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class GeminiSearchProvider:
+    name = "gemini"
+
     # Tried in order; current (Gemini 2.0+) models use the "google_search"
     # tool name. (Older 1.x models used "google_search_retrieval" instead,
     # which is NOT compatible with these — mixing them causes a 400 error.)
@@ -166,6 +181,10 @@ class GeminiSearchProvider:
         self.api_keys: List[str] = api_keys if api_keys is not None else self._resolve_api_keys()
         self._key_cursor = 0
         self._cache: Dict[str, WebSearchConnectorOutput] = {}
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_keys)
 
     @staticmethod
     def _resolve_api_keys() -> List[str]:
@@ -397,13 +416,271 @@ class GeminiSearchProvider:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Datasheets.com provider — real component catalog search
+#
+# Queries https://www.datasheets.com/api/v1/search (Bearer auth) and maps the
+# returned MPN / manufacturer / datasheet URL / parametric specs onto a
+# CandidateComponent. Unlike Gemini this is a deterministic catalog lookup, so
+# every result already references a real, existing part page. Where the API
+# returns operating-voltage / current specs we parse them so the same hard
+# constraint gate (_score_web_candidate) applies; where it doesn't, the
+# candidate is still returned (the offline scorer / validators handle it)
+# rather than degrading to a ghost passive.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Spec-name preferences (lower-cased substrings), most-specific first.
+_DS_VMIN_KEYS = ("min supply voltage", "min input voltage", "min operating voltage")
+_DS_VMAX_KEYS = ("max supply voltage", "max input voltage", "max operating voltage")
+_DS_VNOM_KEYS = ("operating supply voltage", "supply voltage", "nominal output voltage",
+                 "output voltage", "input voltage", "voltage")
+_DS_CURR_KEYS = ("max output current", "output current", "max supply current",
+                 "supply current", "continuous output current", "current")
+
+
+def _ds_parse_quantity(value: Optional[str]) -> Optional[float]:
+    """Pull the leading signed number out of a spec value like '4.5V', '200mA',
+    '1.11W'. Returns the raw number (no unit conversion)."""
+    if not value:
+        return None
+    m = re.search(r"[-+]?\d*\.?\d+", str(value))
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
+def _ds_to_volts(value: Optional[str]) -> Optional[float]:
+    n = _ds_parse_quantity(value)
+    if n is None:
+        return None
+    v = str(value).lower()
+    if "mv" in v:
+        return n / 1000.0
+    if "kv" in v:
+        return n * 1000.0
+    return n
+
+
+def _ds_to_ma(value: Optional[str]) -> Optional[float]:
+    n = _ds_parse_quantity(value)
+    if n is None:
+        return None
+    v = str(value).lower()
+    if "ma" in v:
+        return n
+    if "\u00b5a" in v or "ua" in v:
+        return n / 1000.0
+    if "na" in v:
+        return n / 1_000_000.0
+    if "a" in v:  # bare amps (checked after mA/µA/nA)
+        return n * 1000.0
+    return n
+
+
+def _ds_find_spec(specs: Dict[str, str], keys) -> Optional[str]:
+    for key in keys:
+        for name, value in specs.items():
+            if key in name:
+                return value
+    return None
+
+
+class DatasheetsSearchProvider:
+    name = "datasheets"
+    _BASE_URL = "https://www.datasheets.com/api/v1/search"
+    _TIMEOUT = 20.0
+    _LIMIT = 5
+    _UA = "samvit-part-selection/1.0"
+
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key if api_key is not None else os.environ.get("DATASHEETS_API_KEY")
+        self._cache: Dict[str, WebSearchConnectorOutput] = {}
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    async def search(self, query: WebSearchConnectorInput) -> WebSearchConnectorOutput:
+        if not self.available:
+            return WebSearchConnectorOutput(query=query.category, candidates=[])
+
+        cache_key = json.dumps({"cat": query.category, "req": query.requirements}, sort_keys=True)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        q = self._build_query(query)
+        try:
+            payload = await asyncio.to_thread(self._request, q)
+        except Exception as exc:  # noqa: BLE001 — network/parse errors must not break selection
+            logger.warning("[DatasheetsSearchProvider] Search failed for '%s' (q=%r): %s",
+                           query.category, q, exc)
+            return WebSearchConnectorOutput(query=query.category, candidates=[])
+
+        results = payload.get("results") or []
+        candidates: List[CandidateComponent] = []
+        for rank, raw in enumerate(results):
+            cand = self._parse_result(raw, query, rank)
+            if cand is not None:
+                candidates.append(cand)
+
+        result = WebSearchConnectorOutput(
+            query=query.category,
+            candidates=candidates,
+            search_metadata={"provider": "datasheets.com", "count": payload.get("count")},
+        )
+        self._cache[cache_key] = result
+        return result
+
+    def _build_query(self, query: WebSearchConnectorInput) -> str:
+        """Build the keyword query: the subsystem category, enriched with the
+        most discriminating numeric hints so a vague category like 'POWER'
+        still ranks relevant parts."""
+        parts = [str(query.category).strip()]
+        reqs = query.requirements or {}
+        v_max = reqs.get("voltage_max")
+        if v_max:
+            parts.append(f"{v_max:g}V")
+        c_min = reqs.get("current_min")
+        if c_min:
+            parts.append(f"{c_min / 1000.0:g}A" if c_min >= 1000 else f"{c_min:g}mA")
+        return " ".join(p for p in parts if p)
+
+    def _request(self, q: str) -> Dict[str, Any]:
+        url = self._BASE_URL + "?" + urllib.parse.urlencode(
+            {"q": q, "limit": self._LIMIT, "page": 1}
+        )
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Accept": "application/json",
+                "User-Agent": self._UA,
+            },
+        )
+        with urllib.request.urlopen(req, timeout=self._TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def _parse_result(self, raw: Dict[str, Any], query: WebSearchConnectorInput,
+                      rank: int) -> Optional[CandidateComponent]:
+        part_number = str(raw.get("mpn") or "").strip()
+        source_url = str(raw.get("url") or "").strip()
+        if not part_number or not source_url.lower().startswith(("http://", "https://")):
+            return None
+
+        specs_list = raw.get("specs") or []
+        specs = {
+            str(s.get("name", "")).lower(): str(s.get("value", ""))
+            for s in specs_list if isinstance(s, dict)
+        }
+
+        v_min = _ds_to_volts(_ds_find_spec(specs, _DS_VMIN_KEYS))
+        v_max = _ds_to_volts(_ds_find_spec(specs, _DS_VMAX_KEYS))
+        if v_min is None and v_max is None:
+            v_nom = _ds_to_volts(_ds_find_spec(specs, _DS_VNOM_KEYS))
+            v_min = v_max = v_nom
+        current_ma = _ds_to_ma(_ds_find_spec(specs, _DS_CURR_KEYS))
+
+        package = raw.get("packageType") or specs.get("package/case")
+
+        # Rank- and lifecycle-aware confidence; results are returned best-match
+        # first, so earlier ranks score higher. Obsolete/EOL parts are penalised.
+        confidence = max(0.5, 0.85 - 0.05 * rank)
+        lifecycle = str(raw.get("lifecycleStatus") or "").lower()
+        if any(t in lifecycle for t in ("obsolete", "end of life", "eol", "discontinued", "nrnd")):
+            confidence = max(0.4, confidence - 0.2)
+
+        return CandidateComponent(
+            part_number=part_number,
+            manufacturer=str(raw.get("manufacturer") or "Unknown"),
+            source_url=source_url,
+            datasheet_url=(str(raw["datasheetUrl"]) if raw.get("datasheetUrl") else None),
+            package=(str(package) if package else None),
+            category=query.category,
+            confidence=confidence,
+            retrieval_method="datasheets_com_api",
+            voltage_min=v_min,
+            voltage_max=v_max,
+            current_ma=current_ma,
+            cost_usd_estimate=None,  # the search API does not return pricing
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DigiKey provider — thin adapter over the existing web_search_connector
+# implementation. Only active when DIGIKEY_CLIENT_ID + DIGIKEY_CLIENT_SECRET are
+# set; otherwise it self-skips so it can sit at the top of the chain harmlessly.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class DigiKeySearchProvider:
+    name = "digikey"
+
+    def __init__(self, client_id: Optional[str] = None, client_secret: Optional[str] = None):
+        self.client_id = client_id if client_id is not None else os.environ.get("DIGIKEY_CLIENT_ID", "")
+        self.client_secret = (client_secret if client_secret is not None
+                              else os.environ.get("DIGIKEY_CLIENT_SECRET", ""))
+
+    @property
+    def available(self) -> bool:
+        return bool(self.client_id and self.client_secret)
+
+    async def search(self, query: WebSearchConnectorInput) -> WebSearchConnectorOutput:
+        if not self.available:
+            return WebSearchConnectorOutput(query=query.category, candidates=[])
+        try:
+            from hardware_builder.web_search_connector import (
+                DigiKeyProvider, InMemoryCache,
+                WebSearchConnectorInput as _WInput,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DigiKeySearchProvider] Unavailable (import failed): %s", exc)
+            return WebSearchConnectorOutput(query=query.category, candidates=[])
+
+        provider = DigiKeyProvider(InMemoryCache(), self.client_id, self.client_secret)
+        winput = _WInput(category=query.category, requirements=query.requirements)
+        try:
+            resp = await provider.search(winput)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[DigiKeySearchProvider] Search failed for '%s': %s", query.category, exc)
+            return WebSearchConnectorOutput(query=query.category, candidates=[])
+
+        candidates = [
+            CandidateComponent(
+                part_number=c.part_number,
+                manufacturer=c.manufacturer or "Unknown",
+                source_url=c.source_url,
+                datasheet_url=c.datasheet_url,
+                package=c.package,
+                category=query.category,
+                confidence=c.confidence or 0.7,
+                retrieval_method="digikey_api",
+            )
+            for c in resp.candidates if getattr(c, "part_number", "")
+        ]
+        return WebSearchConnectorOutput(query=query.category, candidates=candidates)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Core selection engine
 # ──────────────────────────────────────────────────────────────────────────────
 
 class PartSelectionEngine:
     def __init__(self, db_path: str, api_keys: Optional[List[str]] = None):
         self.db_path = db_path
-        self.online_provider = GeminiSearchProvider(api_keys=api_keys)
+        # Ordered web-search fallback chain (tried only when the offline DB has
+        # no usable match). Each provider self-skips when its credential is
+        # absent, so the effective chain is "whatever is configured":
+        #   DigiKey  →  Datasheets.com  →  Gemini
+        self.gemini_provider = GeminiSearchProvider(api_keys=api_keys)
+        self.web_providers = [
+            DigiKeySearchProvider(),
+            DatasheetsSearchProvider(),
+            self.gemini_provider,
+        ]
+        # Back-compat alias (older callers / tests referenced online_provider).
+        self.online_provider = self.gemini_provider
 
     def _query_offline_db(self, category: str) -> List[ComponentCandidate]:
         """Queries the SQLite database for matches based on category strings."""
@@ -498,8 +775,9 @@ class PartSelectionEngine:
             )
             return best_local
 
-        # Step 2: real web search — no match locally, search live, no mock fallback.
-        logger.info("[Engine] No offline match for '%s'. Searching the web...", reqs.category)
+        # Step 2: real web search — no match locally. Walk the provider chain
+        # (DigiKey → Datasheets → Gemini) and take the first real, in-spec hit.
+        logger.info("[Engine] No offline match for '%s'. Trying web providers...", reqs.category)
         web_input = WebSearchConnectorInput(
             category=reqs.category,
             requirements={
@@ -510,49 +788,66 @@ class PartSelectionEngine:
             },
         )
 
-        try:
-            online_response = await self.online_provider.search(web_input)
-        except Exception as exc:
-            logger.warning("[Engine] Web search raised for '%s': %s", reqs.category, exc)
-            return None
+        for provider in self.web_providers:
+            if not getattr(provider, "available", True):
+                logger.info("[Engine] Skipping '%s' provider (not configured).", provider.name)
+                continue
 
-        if not online_response.candidates:
-            logger.warning("[Engine] No real, verifiable component found for '%s' (offline or online).", reqs.category)
-            return None
+            try:
+                response = await provider.search(web_input)
+            except Exception as exc:  # noqa: BLE001 — one provider failing must not abort the chain
+                logger.warning("[Engine] '%s' provider raised for '%s': %s",
+                               provider.name, reqs.category, exc)
+                continue
 
-        best_online = online_response.candidates[0]
-        score = self._score_web_candidate(best_online, reqs)
-        if score < 0:
-            logger.warning(
-                "[Engine] Web result '%s' for '%s' failed hard constraints "
-                "(voltage/current/cost) — rejecting rather than using a "
-                "real-but-unsuitable part.", best_online.part_number, reqs.category,
-            )
-            return None
+            for candidate in response.candidates:
+                score = self._score_web_candidate(candidate, reqs)
+                if score < 0:
+                    logger.info(
+                        "[Engine] '%s' result '%s' for '%s' failed hard constraints "
+                        "(voltage/current/cost) — trying next candidate.",
+                        provider.name, candidate.part_number, reqs.category,
+                    )
+                    continue
+                logger.info(
+                    "[Engine] Found via '%s': %s (%s, confidence=%.2f) — %s",
+                    provider.name, candidate.part_number, candidate.manufacturer,
+                    candidate.confidence, candidate.source_url,
+                )
+                return self._web_candidate_to_component(candidate, reqs, provider.name, score)
 
-        logger.info(
-            "[Engine] Found via web search: %s (%s, confidence=%.2f) — %s",
-            best_online.part_number, best_online.manufacturer,
-            best_online.confidence, best_online.source_url,
+            logger.info("[Engine] '%s' provider returned no usable candidate for '%s'.",
+                        provider.name, reqs.category)
+
+        logger.warning(
+            "[Engine] No real, verifiable component found for '%s' (offline or any "
+            "web provider).", reqs.category,
         )
+        return None
+
+    @staticmethod
+    def _web_candidate_to_component(
+        candidate: CandidateComponent, reqs: ComponentRequirements,
+        provider_name: str, score: float,
+    ) -> ComponentCandidate:
         return ComponentCandidate(
-            part_number=best_online.part_number,
-            manufacturer=best_online.manufacturer,
-            category=best_online.category or reqs.category,
+            part_number=candidate.part_number,
+            manufacturer=candidate.manufacturer,
+            category=candidate.category or reqs.category,
             source="web_search",
             voltage_raw=(
-                f"{best_online.voltage_min if best_online.voltage_min is not None else ''}-"
-                f"{best_online.voltage_max if best_online.voltage_max is not None else ''}V"
+                f"{candidate.voltage_min if candidate.voltage_min is not None else ''}-"
+                f"{candidate.voltage_max if candidate.voltage_max is not None else ''}V"
             ),
-            current_raw=f"{best_online.current_ma if best_online.current_ma is not None else ''}mA",
-            package=best_online.package,
-            cost_usd=best_online.cost_usd_estimate or 0.0,
+            current_raw=f"{candidate.current_ma if candidate.current_ma is not None else ''}mA",
+            package=candidate.package,
+            cost_usd=candidate.cost_usd_estimate or 0.0,
             confidence_score=score,
-            source_url=best_online.source_url,
-            datasheet_url=best_online.datasheet_url,
+            source_url=candidate.source_url,
+            datasheet_url=candidate.datasheet_url,
             notes=(
-                f"Found via live web search (Gemini + Google Search grounding); "
-                f"source: {best_online.source_url}"
+                f"Found via live web search ({provider_name}); "
+                f"source: {candidate.source_url}"
             ),
         )
 
