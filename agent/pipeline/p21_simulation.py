@@ -27,6 +27,14 @@ from agent.core.models import (
 )
 
 
+# Power-source categories: parts rated by supply capacity, not consumption.
+# Kept in sync with p18_power's source classification so the two stages agree
+# on what is a "load" vs a "supply".
+_POWER_SOURCE_CATEGORIES = (
+    "POWER", "LDO", "Buck-Boost", "Charger IC", "Boost Converter", "Battery",
+)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Sub-simulators
 # ──────────────────────────────────────────────────────────────────────────────
@@ -43,11 +51,12 @@ def _sim_voltage_stability(
     issues: List[Issue] = []
     regulators = [
         c for pn in selected_pns
-        if (c := components.get(pn)) and c.category in ("POWER", "LDO", "Buck-Boost", "Charger IC")
+        if (c := components.get(pn))
+        and c.category in ("POWER", "LDO", "Buck-Boost", "Charger IC", "Boost Converter")
     ]
     consumers = [
         c for pn in selected_pns
-        if (c := components.get(pn)) and c.category not in ("POWER", "LDO", "Buck-Boost", "Charger IC", "Battery")
+        if (c := components.get(pn)) and c.category not in _POWER_SOURCE_CATEGORIES
     ]
 
     if not regulators:
@@ -143,10 +152,18 @@ def _sim_power_consumption(
     selected_pns: List[str],
     load_factor: float = 1.0,
 ) -> float:
-    """Return total power draw in mW at given load factor."""
+    """Return total power draw in mW at given load factor.
+
+    Only consumers count toward power draw. Power-source parts (regulators,
+    batteries, etc.) are rated by their *supply capacity* (e.g. 20V/5000mA),
+    not the power they consume — including them would inject a huge phantom
+    load. This matches p18_power, which routes the same categories to rail
+    `sources` and excludes them from consumer draw.
+    """
     return sum(
         c.voltage_max * c.current_ma * load_factor
-        for pn in selected_pns if (c := components.get(pn))
+        for pn in selected_pns
+        if (c := components.get(pn)) and c.category not in _POWER_SOURCE_CATEGORIES
     )
 
 
