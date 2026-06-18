@@ -142,6 +142,17 @@ def parse_args() -> argparse.Namespace:
         help="Directory for design checkpoints (default: checkpoint)",
     )
     p.add_argument(
+        "--resume",
+        dest="resume_from",
+        default=None,
+        help=(
+            "Resume from a saved checkpoint. Accepts a checkpoint dir "
+            "(e.g. checkpoint/checkpoint_016), a base checkpoint dir "
+            "(uses the latest), or a state.json file. Skips the setup phases "
+            "and continues from integration → validation → repair loop."
+        ),
+    )
+    p.add_argument(
         "--db-path",
         default=os.environ.get("SAMVIT_DB_PATH"),
         help="Path to samvit_parts.db",
@@ -199,10 +210,15 @@ async def _main() -> None:
 
     elif args.requirements:
         requirements_input = args.requirements
+    elif args.resume_from:
+        # Requirements come from the checkpoint when resuming.
+        requirements_input = None
+        log.info("Resuming from checkpoint %s — requirements taken from state.", args.resume_from)
     else:
-        print("ERROR: Provide requirements as a string, --req file, or --demo.")
+        print("ERROR: Provide requirements as a string, --req file, --demo, or --resume.")
         print("  python main.py 'Build a IoT soil moisture sensor'")
         print("  python main.py --demo")
+        print("  python main.py --resume checkpoint/checkpoint_016")
         sys.exit(1)
 
     # ── Resolve human overrides ──────────────────────────────────────────────
@@ -215,16 +231,30 @@ async def _main() -> None:
     api_keys = resolve_api_keys()
     log.info("Loaded %d Gemini API key(s).", len(api_keys))
 
+    # ── Resolve checkpoint dir (resume appends to the same base tree) ────────
+    checkpoint_dir = args.checkpoint_dir
+    if args.resume_from:
+        from agent.core.checkpoint import CheckpointManager
+        try:
+            checkpoint_dir = CheckpointManager.resolve(args.resume_from)["base_dir"]
+        except FileNotFoundError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+
     # ── Run pipeline ─────────────────────────────────────────────────────────
     orch = SamvitOrchestrator(
         api_keys=api_keys,
-        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_dir=checkpoint_dir,
         db_path=args.db_path,
         max_main_iterations=args.max_iter,
         max_fix_rounds=args.max_fix,
     )
 
-    final_state = await orch.run(requirements_input, human_overrides=overrides)
+    final_state = await orch.run(
+        requirements_input,
+        human_overrides=overrides,
+        resume_from=args.resume_from,
+    )
 
     # ── Exit code based on design quality ────────────────────────────────────
     m = final_state.metrics

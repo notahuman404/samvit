@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -393,3 +393,105 @@ class DesignState:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, default=str)
+
+    # ── Deserialisation (checkpoint resume) ──────────────────────────────────
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "DesignState":
+        """
+        Rebuild a DesignState from a checkpoint dict (the inverse of to_dict).
+        Defensive: missing/extra keys are tolerated so older or partial
+        checkpoints can still be resumed.
+        """
+        st = cls()
+        st.iteration = int(d.get("iteration", 0) or 0)
+
+        if d.get("requirements"):
+            st.requirements = _build_dc(HardwareRequirements, d["requirements"])
+        if d.get("architecture"):
+            arch = d["architecture"]
+            st.architecture = SystemArchitecture(
+                subsystems=[_build_dc(Subsystem, s) for s in arch.get("subsystems", [])],
+                power_budget_mw=float(arch.get("power_budget_mw", 0.0) or 0.0),
+                notes=arch.get("notes", ""),
+                raw_plan=arch.get("raw_plan", ""),
+            )
+
+        for ref, cd in (d.get("components") or {}).items():
+            st.components[ref] = _build_component(cd)
+
+        if d.get("schematic"):
+            sc = d["schematic"]
+            st.schematic = Schematic(
+                components=[_build_dc(SchematicComponent, c) for c in sc.get("components", [])],
+                nets=[Net(name=n.get("name", ""),
+                          nodes=[_build_dc(NetNode, nd) for nd in n.get("nodes", [])])
+                      for n in sc.get("nets", [])],
+                title=sc.get("title", "Untitled"),
+                revision=sc.get("revision", "v0.1"),
+            )
+        if d.get("layout"):
+            ly = d["layout"]
+            st.layout = PCBLayout(
+                board_width=float(ly.get("board_width", 100.0) or 100.0),
+                board_height=float(ly.get("board_height", 80.0) or 80.0),
+                placed=[_build_dc(PlacedComponent, p) for p in ly.get("placed", [])],
+                traces=[_build_dc(TraceSegment, t) for t in ly.get("traces", [])],
+                via_count=int(ly.get("via_count", 0) or 0),
+            )
+        if d.get("rules"):
+            st.rules = _build_dc(DesignRules, d["rules"])
+        if d.get("metrics"):
+            st.metrics = _build_dc(DesignMetrics, d["metrics"])
+
+        for stage, sr in (d.get("stage_results") or {}).items():
+            st.stage_results[stage] = StageResult(
+                stage=sr.get("stage", stage),
+                status=StageStatus(sr.get("status", "PASSED")),
+                data=sr.get("data", {}) or {},
+                issues=[Issue(code=i.get("code", ""),
+                              severity=Severity(i.get("severity", "INFO")),
+                              message=i.get("message", ""),
+                              source=i.get("source", ""),
+                              objects=i.get("objects", []) or [])
+                        for i in sr.get("issues", [])],
+                metrics=sr.get("metrics", {}) or {},
+                duration=float(sr.get("duration", 0.0) or 0.0),
+            )
+        return st
+
+    @classmethod
+    def from_json(cls, text: str) -> "DesignState":
+        return cls.from_dict(json.loads(text))
+
+
+def _field_names(dc_cls: type) -> set:
+    return {f.name for f in dc_fields(dc_cls)}
+
+
+def _build_dc(dc_cls: type, data: Dict[str, Any]):
+    """Build a flat dataclass, ignoring keys it doesn't declare."""
+    allowed = _field_names(dc_cls)
+    return dc_cls(**{k: v for k, v in (data or {}).items() if k in allowed})
+
+
+def _build_component(cd: Dict[str, Any]) -> "Component":
+    """Rebuild a Component including its nested pins / interfaces."""
+    allowed = _field_names(Component)
+    kwargs = {k: v for k, v in cd.items() if k in allowed and k not in ("pins", "interfaces")}
+    comp = Component(**kwargs)
+    for pname, ps in (cd.get("pins") or {}).items():
+        comp.pins[pname] = PinSpec(
+            name=ps.get("name", pname),
+            type=PinType(ps.get("type", "PASSIVE")),
+            voltage_min=float(ps.get("voltage_min", 0.0) or 0.0),
+            voltage_max=float(ps.get("voltage_max", 5.0) or 5.0),
+            current_max=float(ps.get("current_max", 0.0) or 0.0),
+            current_draw=float(ps.get("current_draw", 0.0) or 0.0),
+        )
+    for isp in (cd.get("interfaces") or []):
+        comp.interfaces.append(InterfaceSpec(
+            name=isp.get("name", ""),
+            type=InterfaceType(isp.get("type", "PASSIVE")),
+            pins=isp.get("pins", []) or [],
+        ))
+    return comp

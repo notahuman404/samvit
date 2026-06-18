@@ -134,6 +134,53 @@ class CheckpointManager:
             return None
         return json.loads(state_file.read_text(encoding="utf-8"))
 
+    @staticmethod
+    def resolve(path: str) -> Dict[str, Any]:
+        """
+        Resolve a user-supplied resume path to a concrete checkpoint.
+
+        Accepts any of:
+          * a checkpoint directory          → checkpoint/checkpoint_016
+          * a base checkpoint directory     → checkpoint   (uses the latest)
+          * a direct state.json file        → checkpoint/checkpoint_016/state.json
+
+        Returns a dict: {"state": <dict>, "manifest": <dict|None>,
+                          "base_dir": <str>, "checkpoint_dir": <str>}.
+        Raises FileNotFoundError if no usable state.json can be found.
+        """
+        p = Path(path)
+
+        # Direct state.json file.
+        if p.is_file() and p.name == "state.json":
+            cp_dir = p.parent
+        elif p.is_dir() and (p / "state.json").exists():
+            cp_dir = p                                  # a checkpoint_XXX dir
+        elif p.is_dir():
+            cps = sorted(p.glob("checkpoint_*"))         # a base dir → latest
+            cps = [c for c in cps if (c / "state.json").exists()]
+            if not cps:
+                raise FileNotFoundError(f"No checkpoint with state.json under '{path}'.")
+            cp_dir = cps[-1]
+        else:
+            raise FileNotFoundError(f"Resume path not found: '{path}'.")
+
+        state = json.loads((cp_dir / "state.json").read_text(encoding="utf-8"))
+        manifest = None
+        mf = cp_dir / "manifest.json"
+        if mf.exists():
+            manifest = json.loads(mf.read_text(encoding="utf-8"))
+
+        # New checkpoints should continue numbering in the SAME base dir
+        # (parent of checkpoint_XXX), so the resumed run appends rather than
+        # starting a fresh tree.
+        base_dir = cp_dir.parent if cp_dir.name.startswith("checkpoint_") else cp_dir
+        return {
+            "state":          state,
+            "manifest":       manifest,
+            "base_dir":       base_dir.as_posix(),
+            "checkpoint_dir": cp_dir.as_posix(),
+        }
+
     def list_checkpoints(self) -> list[Dict[str, Any]]:
         """Return all checkpoint manifests sorted by number."""
         manifests = []

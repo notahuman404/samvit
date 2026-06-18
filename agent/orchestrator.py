@@ -441,86 +441,115 @@ class SamvitOrchestrator:
         self,
         requirements_input: Any,
         human_overrides: Optional[Dict[str, Any]] = None,
+        resume_from: Optional[str] = None,
     ) -> DesignState:
         """
         Entry point. `requirements_input` can be a string (free text) or dict.
+
+        If `resume_from` is given (a checkpoint dir, a base checkpoint dir, or a
+        state.json file) the expensive setup phases (requirements, architecture,
+        component DB, datasheet parsing, per-segment build) are SKIPPED: the
+        design state is rebuilt from the checkpoint and the pipeline continues
+        from system integration → validation → the critique/repair loop.
+
         Returns the final DesignState after all iterations.
         """
-        state = DesignState(checkpoint_dir=self.checkpoint.base_dir.as_posix())
         t_start = time.monotonic()
 
         log.info("╔══════════════════════════════════════════════════════════╗")
         log.info("║          SAMVIT AUTONOMOUS HARDWARE PIPELINE             ║")
         log.info("╚══════════════════════════════════════════════════════════╝")
 
-        # ── Phase 0: Requirements ─────────────────────────────────────────────
-        log.info("\n📌  PHASE 0 — REQUIREMENTS")
-        r01 = _run("p01_requirements", p01_requirements.run, state, requirements_input)
-        state.record(r01)
-        if not r01.ok():
-            log.error("Requirements failed — aborting. Errors: %s", r01.errors())
-            return state
+        if resume_from is not None:
+            # ── Resume: rebuild state from a checkpoint and continue ──────────
+            info = CheckpointManager.resolve(resume_from)
+            state = DesignState.from_dict(info["state"])
+            state.checkpoint_dir = self.checkpoint.base_dir.as_posix()
+            log.info("\n♻️  RESUMING FROM CHECKPOINT — %s", info["checkpoint_dir"])
+            log.info("    iteration=%d  components=%d  stages_done=%d",
+                     state.iteration, len(state.components), len(state.stage_results))
+            m = state.metrics
+            if m:
+                log.info("    metrics: ERC=%d DRC=%d Sim=%.0f%% Temp=%.1f°C Battery=%.1fh",
+                         m.erc_errors, m.drc_errors, m.sim_pass_rate * 100,
+                         m.max_temp_c, m.estimated_battery_h)
+            if state.requirements is None or not state.components:
+                log.error(
+                    "Checkpoint is missing requirements/components — cannot resume. "
+                    "Run a fresh build instead. Aborting.")
+                return state
+            log.info("  ⏩  Skipping setup phases (0–3); continuing from integration.")
+        else:
+            state = DesignState(checkpoint_dir=self.checkpoint.base_dir.as_posix())
 
-        # ── Phase 1: Global Plan (Architecture) — Gemini call #1 ─────────────
-        log.info("\n🧠  PHASE 1 — GLOBAL ARCHITECTURE PLAN  (Gemini call #1)")
-        r03 = await _run_async("p03_architecture",
-                               p03_architecture.run_async(state, self.gemini))
-        state.record(r03)
-        if not r03.ok():
-            log.error("Architecture planning failed. Errors: %s", r03.errors())
-            return state
+            # ── Phase 0: Requirements ─────────────────────────────────────────
+            log.info("\n📌  PHASE 0 — REQUIREMENTS")
+            r01 = _run("p01_requirements", p01_requirements.run, state, requirements_input)
+            state.record(r01)
+            if not r01.ok():
+                log.error("Requirements failed — aborting. Errors: %s", r01.errors())
+                return state
 
-        arch = state.architecture
-        log.info("  Planned %d subsystems:", len(arch.subsystems))
-        for sub in arch.subsystems:
-            log.info("    [%s] %s — %s  %.1fV  %.0fmA",
-                     sub.category, sub.name, sub.role, sub.voltage_max, sub.current_ma)
+            # ── Phase 1: Global Plan (Architecture) — Gemini call #1 ─────────
+            log.info("\n🧠  PHASE 1 — GLOBAL ARCHITECTURE PLAN  (Gemini call #1)")
+            r03 = await _run_async("p03_architecture",
+                                   p03_architecture.run_async(state, self.gemini))
+            state.record(r03)
+            if not r03.ok():
+                log.error("Architecture planning failed. Errors: %s", r03.errors())
+                return state
 
-        # ── Phase 2: Component database + datasheet parsing (Gemini #2) ──────
-        log.info("\n🗄️  PHASE 2 — COMPONENT DATABASE + DATASHEET PARSING")
-        r06 = _run("p06_component_db", p06_component_db.run, state,
-                   *([self.db_path] if self.db_path else []))
-        state.record(r06)
+            arch = state.architecture
+            log.info("  Planned %d subsystems:", len(arch.subsystems))
+            for sub in arch.subsystems:
+                log.info("    [%s] %s — %s  %.1fV  %.0fmA",
+                         sub.category, sub.name, sub.role, sub.voltage_max, sub.current_ma)
 
-        # Datasheet batch parse — Gemini call #2
-        log.info("  Datasheet parser (Gemini call #2) …")
-        r05 = await _run_async("p05_datasheet",
-                               p05_datasheet.run_async(state, self.gemini))
-        state.record(r05)
+            # ── Phase 2: Component database + datasheet parsing (Gemini #2) ──
+            log.info("\n🗄️  PHASE 2 — COMPONENT DATABASE + DATASHEET PARSING")
+            r06 = _run("p06_component_db", p06_component_db.run, state,
+                       *([self.db_path] if self.db_path else []))
+            state.record(r06)
 
-        log.info("  Component DB: %d parts loaded, %d parsed from datasheets",
-                 r06.data.get("loaded_count", 0), r05.data.get("parsed_count", 0))
+            # Datasheet batch parse — Gemini call #2
+            log.info("  Datasheet parser (Gemini call #2) …")
+            r05 = await _run_async("p05_datasheet",
+                                   p05_datasheet.run_async(state, self.gemini))
+            state.record(r05)
 
-        # ── Phase 3: Per-segment Build + Local Validate ───────────────────────
-        log.info("\n🔧  PHASE 3 — PER-SEGMENT BUILD + LOCAL VALIDATE")
+            log.info("  Component DB: %d parts loaded, %d parsed from datasheets",
+                     r06.data.get("loaded_count", 0), r05.data.get("parsed_count", 0))
 
-        # Component search + selection (needed before segmentation)
-        r07 = _run("p07_component_search", p07_component_search.run, state)
-        state.record(r07)
-        r08 = _run("p08_part_selection", p08_part_selection.run, state)
-        state.record(r08)
+            # ── Phase 3: Per-segment Build + Local Validate ───────────────────
+            log.info("\n🔧  PHASE 3 — PER-SEGMENT BUILD + LOCAL VALIDATE")
 
-        segments = _categorise_into_segments(arch)
-        log.info("  Segments: %s", list(segments.keys()))
+            # Component search + selection (needed before segmentation)
+            r07 = _run("p07_component_search", p07_component_search.run, state)
+            state.record(r07)
+            r08 = _run("p08_part_selection", p08_part_selection.run, state)
+            state.record(r08)
 
-        for seg_name, subsystems in segments.items():
-            log.info("\n  ── Segment: %s (%d subsystems) ──", seg_name, len(subsystems))
-            for sub in subsystems:
-                log.info("       %s (%s)", sub.name, sub.category)
+            segments = _categorise_into_segments(arch)
+            log.info("  Segments: %s", list(segments.keys()))
 
-            # Build: footprint + compatibility for this segment's parts
-            r09 = _run("p09_compatibility", p09_compatibility.run, state)
-            state.record(r09)
-            r12 = _run("p12_footprint", p12_footprint.run, state)
-            state.record(r12)
+            for seg_name, subsystems in segments.items():
+                log.info("\n  ── Segment: %s (%d subsystems) ──", seg_name, len(subsystems))
+                for sub in subsystems:
+                    log.info("       %s (%s)", sub.name, sub.category)
 
-            # Local validate
-            passed = _local_validate_segment(state, seg_name, subsystems)
-            if not passed:
-                log.warning("  [%s] local validation failed — will fix in repair loop", seg_name)
+                # Build: footprint + compatibility for this segment's parts
+                r09 = _run("p09_compatibility", p09_compatibility.run, state)
+                state.record(r09)
+                r12 = _run("p12_footprint", p12_footprint.run, state)
+                state.record(r12)
 
-        # Checkpoint after segment phase
-        _save_checkpoint(state, self.checkpoint, label="after_segments")
+                # Local validate
+                passed = _local_validate_segment(state, seg_name, subsystems)
+                if not passed:
+                    log.warning("  [%s] local validation failed — will fix in repair loop", seg_name)
+
+            # Checkpoint after segment phase
+            _save_checkpoint(state, self.checkpoint, label="after_segments")
 
         # ── Phase 4: System Integration ───────────────────────────────────────
         log.info("\n🔗  PHASE 4 — SYSTEM INTEGRATION")
