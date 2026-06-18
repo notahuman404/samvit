@@ -741,16 +741,20 @@ def apply_repairs(
             priority=0,
         )]
 
-    # ── Auto-inject power reduction when sim fails on power, not on a missing
+    # ── Auto-inject power reduction when sim fails on power OR the design is
+    # over its power budget (p18). Not when sim fails on a missing
     # regulator/pull-up (which fix_simulation handles). ──────────────────────
-    if (m and m.sim_pass_rate < 0.75
+    _over_budget = bool(m and not getattr(m, "power_ok", True))
+    if (m and (m.sim_pass_rate < 0.75 or _over_budget)
             and "reduce_power" not in repair_actions
             and "SIM_NO_REGULATOR" not in sim_codes):
+        _why = ("over power budget" if _over_budget
+                else "sim failing on excessive power draw")
         repairs = list(repairs) + [RepairInstruction(
             target_stage="p21_simulation",
             action="reduce_power",
             component="power_budget",
-            detail={"reason": "Auto-injected: sim failing on excessive power draw"},
+            detail={"reason": f"Auto-injected: {_why}"},
             priority=60,
         )]
 
