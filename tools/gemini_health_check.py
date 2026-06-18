@@ -136,12 +136,29 @@ def _probe(api_key: str, model: str) -> Tuple[str, float, str]:
     t0 = time.monotonic()
     try:
         genai.configure(api_key=api_key)
+        # Use a realistic output budget: "thinking" models (gemini-2.5/3.x) can
+        # spend a tiny max_output_tokens entirely on reasoning and return no text
+        # Part, which would make response.text raise and look like a failure even
+        # though the model is reachable. 64 tokens is plenty for a reachability
+        # probe without that false positive.
         gm = genai.GenerativeModel(
             model_name=model,
-            generation_config={"temperature": 0.0, "max_output_tokens": 1},
+            generation_config={"temperature": 0.0, "max_output_tokens": 64},
         )
-        resp = gm.generate_content("ping")
-        _ = getattr(resp, "text", "")
+        resp = gm.generate_content("Reply with the single word: ok")
+        # Don't rely on the .text quick accessor (it raises when there is no
+        # plain-text Part). Treat "reachable, returned a candidate" as OK.
+        text = ""
+        try:
+            text = resp.text or ""
+        except Exception:
+            cands = getattr(resp, "candidates", None) or []
+            if cands:
+                parts = getattr(getattr(cands[0], "content", None), "parts", []) or []
+                text = "".join(getattr(p, "text", "") for p in parts)
+                if not text:
+                    fr = getattr(cands[0], "finish_reason", "?")
+                    return "OK", time.monotonic() - t0, f"reachable (no text Part, finish_reason={fr})"
         return "OK", time.monotonic() - t0, ""
     except Exception as exc:
         return _classify(exc), time.monotonic() - t0, str(exc).splitlines()[0][:160]
