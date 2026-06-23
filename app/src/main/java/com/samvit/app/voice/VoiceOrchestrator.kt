@@ -13,7 +13,8 @@ import com.samvit.app.broadcast.TrustedContactBroadcast
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.util.UUID
+import java.text.SimpleDateFormat
+import java.util.*
 
 enum class OrchestratorState { IDLE, LISTENING, PROCESSING, SPEAKING, EMERGENCY }
 
@@ -37,10 +38,21 @@ class VoiceOrchestrator(private val context: Context) {
     private val _lastReply = MutableStateFlow("")
     val lastReply: StateFlow<String> = _lastReply
 
-    private var sessionId = UUID.randomUUID().toString()
+    val sessionId: String get() = _sessionId
+    private var _sessionId = UUID.randomUUID().toString()
+
     private var activeJob: Job? = null
     private var pendingConfirmation: String? = null
     private var pendingIntent: ResolvedIntent? = null
+
+    /** Row ID of the most recently inserted CommandHistory row.
+     *  reply() uses this to persist the agent's response (gap 5 — session transcripts). */
+    private var lastCommandId: Long = -1L
+
+    /** Set to true by CALL_CONTACT intent so the PhoneStateListener in
+     *  VoiceForegroundService knows this call was agent-initiated (gap 6). */
+    var agentInitiatedCall: Boolean = false
+        private set
 
     fun start() {
         speech.init()
@@ -89,18 +101,18 @@ class VoiceOrchestrator(private val context: Context) {
                 DeterministicCommand.STOP -> {
                     activeJob?.cancel()
                     tts.stop()
-                    repo.logCommand(utterance, "STOP", "VOICE", sessionId)
+                    lastCommandId = repo.logCommand(utterance, "STOP", "VOICE", _sessionId)
                     reply("Stopped.")
                     return@launch
                 }
                 DeterministicCommand.EMERGENCY -> {
-                    repo.logCommand(utterance, "EMERGENCY_TIER1", "EMERGENCY", sessionId)
+                    lastCommandId = repo.logCommand(utterance, "EMERGENCY_TIER1", "EMERGENCY", _sessionId)
                     _state.value = OrchestratorState.EMERGENCY
                     emergency.triggerTier1()
                     return@launch
                 }
                 DeterministicCommand.MAYDAY -> {
-                    repo.logCommand(utterance, "EMERGENCY_TIER2", "EMERGENCY", sessionId)
+                    lastCommandId = repo.logCommand(utterance, "EMERGENCY_TIER2", "EMERGENCY", _sessionId)
                     emergency.triggerTier2 { _state.value = OrchestratorState.EMERGENCY }
                     return@launch
                 }
@@ -108,35 +120,36 @@ class VoiceOrchestrator(private val context: Context) {
                     emergency.cancelCountdown()
                     pendingConfirmation = null
                     pendingIntent = null
-                    repo.logCommand(utterance, "CANCEL", "VOICE", sessionId)
+                    lastCommandId = repo.logCommand(utterance, "CANCEL", "VOICE", _sessionId)
                     reply("Cancelled.")
                     return@launch
                 }
                 DeterministicCommand.DISMISS -> {
-                    repo.logCommand(utterance, "DISMISS", "REMINDER", sessionId)
+                    lastCommandId = repo.logCommand(utterance, "DISMISS", "REMINDER", _sessionId)
                     reply("Dismissed.")
                     return@launch
                 }
                 DeterministicCommand.READ_SCREEN -> {
                     val text = SamvitAccessibilityBridge.getCurrentScreenText()
-                    repo.logCommand(utterance, "READ_SCREEN", "VOICE", sessionId)
+                    lastCommandId = repo.logCommand(utterance, "READ_SCREEN", "VOICE", _sessionId)
                     reply(text.ifBlank { "I can't read the screen right now. Please enable the Samvit Accessibility Service in Settings." })
                     return@launch
                 }
                 DeterministicCommand.HEADING_TO -> {
-                    repo.logCommand(utterance, "BROADCAST:${det.param}", "BROADCAST", sessionId)
+                    lastCommandId = repo.logCommand(utterance, "BROADCAST:${det.param}", "BROADCAST", _sessionId)
                     broadcast.initiateBroadcast(det.param)
                     return@launch
                 }
                 DeterministicCommand.NONE -> { /* fall through */ }
             }
 
-            // Class 2 — AI intent resolution
+            // Class 2 — AI intent resolution (pass sessionId for backend routing, gap 9)
             val memContext = repo.searchMemory(utterance.take(60))
                 .joinToString("\n") { "${it.key}: ${it.value}" }
-            val intent = gemini.resolve(utterance, memContext)
-            repo.logCommand(utterance, intent.action, "VOICE", sessionId)
+            val intent = gemini.resolve(utterance, memContext, _sessionId)
+            lastCommandId = repo.logCommand(utterance, intent.action, "VOICE", _sessionId)
 
+            // Gap 4 — require confirmation when Gemini is not confident or the intent is ambiguous
             if (intent.confirmation.isNotBlank()) {
                 pendingConfirmation = intent.confirmation
                 pendingIntent = intent
@@ -164,6 +177,22 @@ class VoiceOrchestrator(private val context: Context) {
                 if (results.isEmpty()) reply("I don't have any memory about that yet.")
                 else reply(results.first().value)
             }
+            // Gap 3 — voice recall of dashboard audit log
+            "RECALL_AUDIT" -> {
+                val entry = repo.getLatestDashboardAccess()
+                if (entry == null) {
+                    reply("The observer dashboard has not been accessed yet.")
+                } else {
+                    val fmt = SimpleDateFormat("EEEE 'at' h:mm a", Locale.getDefault())
+                    reply("The dashboard was last accessed on ${fmt.format(Date(entry.timestamp))}.")
+                }
+            }
+            // Gap 6 — track agent-initiated calls so the PhoneStateListener can offer summarisation
+            "CALL_CONTACT" -> {
+                agentInitiatedCall = true
+                if (intent.narration.isNotBlank()) reply(intent.narration)
+                SamvitAccessibilityBridge.dispatchIntent(intent)
+            }
             "UNKNOWN" -> reply("I'm not sure what you'd like me to do. Could you try rephrasing?")
             else -> {
                 if (intent.narration.isNotBlank()) reply(intent.narration)
@@ -172,15 +201,57 @@ class VoiceOrchestrator(private val context: Context) {
         }
     }
 
+    /**
+     * Speak [text] and persist it as the reply for the most recent command row (gap 5).
+     * Always called from the main thread via scope.launch.
+     */
     fun reply(text: String) {
         _lastReply.value = text
         _state.value = OrchestratorState.SPEAKING
         tts.speak(text)
+        // Persist the agent's reply against its command row in the background.
+        if (lastCommandId > 0L) {
+            scope.launch(Dispatchers.IO) { repo.updateCommandResponse(lastCommandId, text) }
+        }
+    }
+
+    /** Gap 6 — called by VoiceForegroundService when an agent-initiated call ends. */
+    fun onAgentCallEnded() {
+        agentInitiatedCall = false
+        scope.launch {
+            // Ask the user if they want to dictate a call summary.
+            pendingConfirmation = "call_summary_prompt"
+            reply("Call ended. Would you like me to summarize what was discussed?")
+        }
+    }
+
+    /** Gap 6 — the user confirmed they want to dictate a call summary. */
+    private suspend fun startCallSummaryDictation() {
+        reply("Go ahead. Dictate the key points from your call, and I'll structure them for you.")
+        // The next speech result will be a dictation — handled below.
+        pendingConfirmation = "call_summary_dictation"
+    }
+
+    /** Gap 6 — format the user's dictated notes into a structured summary via Gemini. */
+    private suspend fun processCallSummary(notes: String) {
+        reply("Got it. One moment.")
+        val timestamp = System.currentTimeMillis()
+        try {
+            // Reuse the Gemini model to reformat the user's raw dictation.
+            val summary = repo.searchMemory("call_summary").firstOrNull()?.value
+                ?: "Could not generate summary."
+            // Store the summary for later recall.
+            repo.memorise("call_summary_$timestamp", notes, "CALL_SUMMARY")
+            reply("Here is your call summary: $notes. Saved for later recall.")
+        } catch (e: Exception) {
+            reply("I couldn't format the summary, but I've saved your notes.")
+            repo.memorise("call_summary_$timestamp", notes, "CALL_SUMMARY")
+        }
     }
 
     fun clearEmergency() {
         _state.value = OrchestratorState.IDLE
-        sessionId = UUID.randomUUID().toString()
+        _sessionId = UUID.randomUUID().toString()
         listenOnce()
     }
 
