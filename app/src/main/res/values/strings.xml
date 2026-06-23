@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Samvit</string>
+    <string name="accessibility_service_label">Samvit Voice Assistant</string>
+    <string name="accessibility_service_description">Samvit uses accessibility services to read screen content and execute actions on your behalf via voice commands. No data leaves the device without your explicit consent.</string>
+</resources>

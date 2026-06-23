@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Samvit" parent="android:Theme.Material.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@color/samvit_deep</item>
+        <item name="android:statusBarColor">@color/samvit_deep</item>
+        <item name="android:navigationBarColor">@color/samvit_deep</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    </style>
+</resources>
