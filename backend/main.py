@@ -50,12 +50,22 @@ def get_gemini_model():
 # clobbered each other's current_plan and action_history.  Each session now
 # gets its own VisionAgent instance, identified by X-Session-ID header.
 
-_agents: dict[str, VisionAgent] = {}
+from collections import OrderedDict
+
+# LRU cache for agents to prevent memory leaks
+MAX_AGENTS = 100
+_agents: OrderedDict[str, VisionAgent] = OrderedDict()
 
 
 def get_agent(session_id: str) -> VisionAgent:
-    if session_id not in _agents:
-        _agents[session_id] = VisionAgent(api_key=os.environ.get("GEMINI_API_KEY", ""))
+    if session_id in _agents:
+        _agents.move_to_end(session_id)
+        return _agents[session_id]
+    
+    if len(_agents) >= MAX_AGENTS:
+        _agents.popitem(last=False)
+        
+    _agents[session_id] = VisionAgent(api_key=os.environ.get("GEMINI_API_KEY", ""))
     return _agents[session_id]
 
 
@@ -71,7 +81,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
