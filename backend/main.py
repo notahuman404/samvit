@@ -15,9 +15,11 @@ import os
 import base64
 import json
 import logging
+import uuid
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
@@ -43,9 +45,19 @@ def get_gemini_model():
         return genai.GenerativeModel(GEMINI_MODEL_NAME)
     return None
 
-# ─── Agent singleton ─────────────────────────────────────────────────
+# ─── Agent registry (session-keyed for thread safety) ────────────────
+# The global singleton was not thread-safe: concurrent /agent/plan requests
+# clobbered each other's current_plan and action_history.  Each session now
+# gets its own VisionAgent instance, identified by X-Session-ID header.
 
-agent = VisionAgent(api_key=os.environ.get("GEMINI_API_KEY", ""))
+_agents: dict[str, VisionAgent] = {}
+
+
+def get_agent(session_id: str) -> VisionAgent:
+    if session_id not in _agents:
+        _agents[session_id] = VisionAgent(api_key=os.environ.get("GEMINI_API_KEY", ""))
+    return _agents[session_id]
+
 
 # ─── FastAPI app ─────────────────────────────────────────────────────
 
@@ -53,6 +65,15 @@ app = FastAPI(
     title="VisionPilot AI Backend",
     description="FastAPI backend for VisionPilot — voice-controlled phone agent for visually impaired users.",
     version="2.0.0",
+)
+
+# Add CORS middleware so web-based tooling and test UIs can reach the backend.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ================= Request/Response Schemas =================
@@ -110,12 +131,13 @@ class AgentPlanResponse(BaseModel):
     steps: List[str]
     totalSteps: int
     narration: str
+    sessionId: str
 
 class AgentStepRequest(BaseModel):
     success: bool
     screenElementsJson: str = "[]"
     screenDescription: str = ""
-    screenshotBase64: str = ""  # Optional screenshot for vision fallback
+    screenshotBase64: str = ""
     error: str = ""
 
 class AgentConfirmRequest(BaseModel):
@@ -145,6 +167,22 @@ class AgentStatusResponse(BaseModel):
     actionsExecuted: int
     memoryContext: str = ""
 
+# Fix: credentials must NOT travel as query params (URL logs, browser history).
+# Use a Pydantic body model instead.
+class CredentialRequest(BaseModel):
+    app_name: str
+    username: str
+
+# ── Call summarization schemas (stub — see KNOWN_GAPS.md) ───────────
+class CallSummaryRequest(BaseModel):
+    callDurationSeconds: int
+    transcriptText: Optional[str] = None  # populated once STT pipeline exists
+
+class CallSummaryResponse(BaseModel):
+    summary: str
+    actionItems: List[str]
+    stored: bool
+
 # ================= REST ENDPOINTS =================
 
 @app.get("/")
@@ -168,16 +206,24 @@ def read_root():
 @app.post("/voice-command", response_model=VoiceCommandResponse)
 async def voice_command(request: VoiceCommandRequest):
     """
-    Decodes voice input, passes to Gemini for reasoning,
-    and returns a spoken response + whether to execute an action.
+    Accepts a recognized-text string encoded as UTF-8 base64.
+
+    NOTE: The original implementation tried to base64-decode raw audio bytes
+    and then UTF-8 decode the binary blob — PCM/WAV/MP3 is binary and that
+    will produce garbage.  This endpoint therefore expects the Android client
+    to perform on-device STT (e.g. Android SpeechRecognizer) and send the
+    resulting text encoded as UTF-8 base64, NOT raw audio bytes.
+    A future STT pipeline (Whisper or equivalent) should be wired in before
+    this endpoint to lift that responsibility from the client.
     """
     recognized_text = ""
 
     if request.audioBase64:
         try:
-            decoded = base64.b64decode(request.audioBase64).decode("utf-8", errors="ignore")
-            if len(decoded) > 3 and any(c.isalnum() for c in decoded):
-                recognized_text = decoded[:200]
+            # Expect UTF-8 text (already STT-processed on device), not raw PCM.
+            recognized_text = base64.b64decode(request.audioBase64).decode("utf-8").strip()
+            if not any(c.isalnum() for c in recognized_text):
+                recognized_text = ""
         except Exception:
             pass
 
@@ -220,7 +266,6 @@ async def screen_context(request: ScreenContextRequest):
     """
     detected_elements: List[DetectedUiElement] = []
 
-    # Parse accessibility hierarchy first
     try:
         hierarchy = json.loads(request.hierarchyJson)
         if "elements" in hierarchy:
@@ -238,7 +283,6 @@ async def screen_context(request: ScreenContextRequest):
     except Exception:
         pass
 
-    # Enhance with Gemini vision if available
     model = get_gemini_model()
     if model and request.screenshotBase64:
         try:
@@ -326,14 +370,73 @@ async def execute_action(request: ActionExecutionRequest):
     return ActionExecutionResponse(success=True, errorReason=None)
 
 
+# ── Call Summarization (stub — full pipeline requires STT recording) ─
+# See KNOWN_GAPS.md §1 for what needs to be built before this works end-to-end.
+@app.post("/call/summarize", response_model=CallSummaryResponse)
+async def summarize_call(request: CallSummaryRequest):
+    """
+    Distils a completed call into plain-language key points.
+
+    Currently requires the Android client to supply a transcript (obtained
+    via on-device STT during the call).  When a server-side recording +
+    transcription pipeline is added, transcriptText will be populated here
+    automatically.
+    """
+    if not request.transcriptText:
+        return CallSummaryResponse(
+            summary="No transcript available. On-device call transcription is not yet implemented.",
+            actionItems=[],
+            stored=False,
+        )
+
+    model = get_gemini_model()
+    if not model:
+        return CallSummaryResponse(
+            summary="Gemini unavailable — cannot summarize call.",
+            actionItems=[],
+            stored=False,
+        )
+
+    try:
+        prompt = (
+            "You are a helpful assistant for a blind user. "
+            "The following is a transcript of a phone call they just made:\n\n"
+            f"{request.transcriptText}\n\n"
+            "Summarize what was communicated in 1-2 plain sentences a blind user can hear. "
+            "Also list any concrete action items (appointments, documents to bring, etc.). "
+            "Output strict JSON: "
+            '{"summary": "string", "action_items": ["string"]}'
+        )
+        resp = model.generate_content(prompt)
+        data = json.loads(resp.text.strip().replace("```json", "").replace("```", ""))
+        return CallSummaryResponse(
+            summary=data.get("summary", ""),
+            actionItems=data.get("action_items", []),
+            stored=True,
+        )
+    except Exception as e:
+        log.warning("Call summarization failed: %s", e)
+        return CallSummaryResponse(
+            summary="Could not summarize the call.",
+            actionItems=[],
+            stored=False,
+        )
+
+
 # ================= AGENT ENDPOINTS =================
+# All agent endpoints require an X-Session-ID header so each client gets
+# an isolated VisionAgent instance and concurrent requests don't clobber
+# each other's plan state.
+
+def _session_id(x_session_id: Optional[str] = Header(default=None)) -> str:
+    return x_session_id or "default"
+
 
 @app.post("/agent/plan", response_model=AgentPlanResponse)
-async def agent_plan_goal(request: AgentGoalRequest):
-    """
-    Takes a high-level user goal, decomposes it into steps,
-    and returns the plan. The agent is now ready for step-by-step execution.
-    """
+async def agent_plan_goal(request: AgentGoalRequest,
+                          x_session_id: Optional[str] = Header(default=None)):
+    session_id = x_session_id or str(uuid.uuid4())
+    agent = get_agent(session_id)
     agent.reset()
     plan = agent.plan(request.goal)
     narration = f"I'll help you {plan.goal}. I've broken it into {len(plan.steps)} steps. Starting now."
@@ -343,18 +446,14 @@ async def agent_plan_goal(request: AgentGoalRequest):
         steps=plan.steps,
         totalSteps=len(plan.steps),
         narration=narration,
+        sessionId=session_id,
     )
 
 
 @app.post("/agent/next-action", response_model=AgentActionResponse)
-async def agent_next_action(request: AgentStepRequest):
-    """
-    Called after each action is executed on the phone.
-    Reports the result and gets the next action to perform.
-
-    For the first call after /agent/plan, send success=true with
-    the current screen state to get the first action.
-    """
+async def agent_next_action(request: AgentStepRequest,
+                            x_session_id: Optional[str] = Header(default=None)):
+    agent = get_agent(x_session_id or "default")
     result = StepResult(
         success=request.success,
         screen_description=request.screenDescription,
@@ -383,10 +482,9 @@ async def agent_next_action(request: AgentStepRequest):
 
 
 @app.post("/agent/confirm", response_model=AgentActionResponse)
-async def agent_confirm(request: AgentConfirmRequest):
-    """
-    User approves or denies a risky action that requires confirmation.
-    """
+async def agent_confirm(request: AgentConfirmRequest,
+                        x_session_id: Optional[str] = Header(default=None)):
+    agent = get_agent(x_session_id or "default")
     action = agent.confirm_action(request.approved)
     plan = agent.current_plan
 
@@ -407,8 +505,8 @@ async def agent_confirm(request: AgentConfirmRequest):
 
 
 @app.get("/agent/status", response_model=AgentStatusResponse)
-async def agent_status():
-    """Returns the current agent state — useful for the Android UI to poll."""
+async def agent_status(x_session_id: Optional[str] = Header(default=None)):
+    agent = get_agent(x_session_id or "default")
     plan = agent.current_plan
     return AgentStatusResponse(
         hasActivePlan=plan is not None,
@@ -423,15 +521,23 @@ async def agent_status():
 
 
 @app.post("/agent/memory/credential")
-async def agent_remember_credential(app_name: str, username: str):
-    """Store that the agent knows a login for an app."""
-    agent.memory.remember_credential(app_name, username)
-    return {"status": "saved", "app": app_name}
+async def agent_remember_credential(body: CredentialRequest,
+                                    x_session_id: Optional[str] = Header(default=None)):
+    """
+    Store that the agent knows a login for an app.
+
+    Fixed: credentials were previously passed as URL query parameters, which
+    causes them to appear in server logs and browser history.  They now travel
+    in the POST body only.
+    """
+    agent = get_agent(x_session_id or "default")
+    agent.memory.remember_credential(body.app_name, body.username)
+    return {"status": "saved", "app": body.app_name}
 
 
 @app.post("/agent/reset")
-async def agent_reset():
-    """Cancel current plan and clear history."""
+async def agent_reset(x_session_id: Optional[str] = Header(default=None)):
+    agent = get_agent(x_session_id or "default")
     agent.reset()
     return {"status": "reset", "narration": "Agent reset. Ready for a new command."}
 
