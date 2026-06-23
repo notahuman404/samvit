@@ -1,17 +1,12 @@
 package com.samvit.app.commands
 
 import android.content.Context
+import android.util.Log
 import com.google.ai.client.generativeai.GenerativeModel
 import com.google.ai.client.generativeai.type.content
 import com.samvit.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 /**
  * @param action  One of the known action strings or "UNKNOWN".
@@ -33,10 +28,12 @@ data class ResolvedIntent(
 class GeminiIntentResolver(private val context: Context) {
 
     companion object {
+        private const val TAG = "GeminiIntentResolver"
+
         /**
          * Intents with confidence below this threshold are always routed through the
          * user-confirmation flow, regardless of whether Gemini returned a confirmation
-         * string.  This prevents low-confidence guesses from executing silently (gap 4).
+         * string.  Prevents low-confidence guesses from executing silently (gap 4).
          */
         const val CONFIDENCE_THRESHOLD = 0.85f
     }
@@ -48,18 +45,10 @@ class GeminiIntentResolver(private val context: Context) {
         )
     }
 
-    // Lazily constructed — only created when USE_BACKEND_AGENT is true (gap 9).
-    private val httpClient by lazy {
-        OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .build()
-    }
-
     private val systemPrompt = """
 You are Samvit's intent resolver. The user is visually impaired and using voice commands only.
 Parse the user utterance into a structured action JSON with these exact fields:
-- action: one of [OPEN_APP, SEND_MESSAGE, CALL_CONTACT, FIND_SERVICE, SET_REMINDER, RECALL_MEMORY, RECALL_AUDIT, READ_SCREEN, DEVICE_SETTING, WEB_SEARCH, UNKNOWN]
+- action: one of [OPEN_APP, SEND_MESSAGE, CALL_CONTACT, FIND_SERVICE, SET_REMINDER, RECALL_MEMORY, RECALL_AUDIT, RECALL_CALL_SUMMARY, READ_SCREEN, DEVICE_SETTING, WEB_SEARCH, UNKNOWN]
 - params: key-value map (app, contact, message, service, time, query, setting, value, destination)
 - narration: what Samvit says aloud before executing (start with "I'll..." — keep it under 15 words)
 - confirmation: short yes/no question reflecting your interpretation ONLY if:
@@ -76,6 +65,7 @@ Rules:
 2. Be concise in narration — the user hears everything.
 3. For destructive actions (delete, clear), always set a confirmation question.
 4. Use RECALL_AUDIT for utterances like "when was the dashboard last accessed" or "who opened the dashboard".
+5. Use RECALL_CALL_SUMMARY for utterances like "what did the clinic say", "call summary", "what was discussed", "remind me of the call".
 """.trimIndent()
 
     suspend fun resolve(
@@ -83,12 +73,45 @@ Rules:
         memoryContext: String = "",
         sessionId: String = ""
     ): ResolvedIntent = withContext(Dispatchers.IO) {
-        // Gap 9 — route to the backend agent when configured to do so.
+        // Fix 3 — route to backend agent when configured; fall back to on-device Gemini on any error.
         if (BuildConfig.USE_BACKEND_AGENT && BuildConfig.BACKEND_URL.isNotBlank()) {
             resolveViaBackend(utterance, sessionId)?.let { return@withContext it }
-            // Fall through to on-device Gemini if backend is unreachable.
+            Log.w(TAG, "Backend unavailable — falling back to on-device Gemini")
         }
 
+        resolveViaGemini(utterance, memoryContext)
+    }
+
+    // ── Backend routing (fix 3) ───────────────────────────────────────────────
+
+    /**
+     * Call BackendAgentClient.startPlan() and convert the plan into a ResolvedIntent
+     * that VoiceOrchestrator can drive step-by-step.  Returns null on any error so
+     * the caller falls through to on-device Gemini.
+     *
+     * A spoken fallback ("I couldn't reach the backend…") is NOT emitted here —
+     * VoiceOrchestrator handles that after the null return.
+     */
+    private suspend fun resolveViaBackend(utterance: String, sessionId: String): ResolvedIntent? {
+        val plan = BackendAgentClient.startPlan(utterance, sessionId) ?: return null
+        return ResolvedIntent(
+            action    = "BACKEND_PLAN",
+            params    = mapOf(
+                "goal"      to utterance,
+                "sessionId" to plan.sessionId,
+                "firstStep" to plan.steps.firstOrNull().orEmpty()
+            ),
+            narration  = plan.narration,
+            confidence = 0.95f
+        )
+    }
+
+    // ── On-device Gemini (primary and fallback) ───────────────────────────────
+
+    private suspend fun resolveViaGemini(
+        utterance: String,
+        memoryContext: String
+    ): ResolvedIntent = withContext(Dispatchers.IO) {
         try {
             val prompt = buildString {
                 append(systemPrompt)
@@ -107,38 +130,31 @@ Rules:
     }
 
     /**
-     * Gap 9 — POST to /agent/plan on the FastAPI backend and return the first step
-     * translated into a ResolvedIntent.  Returns null on any network/parse error so
-     * the caller can fall back to on-device Gemini.
+     * Fix 2 — format the user's raw call-dictation notes into 2-4 spoken bullet
+     * points using Gemini.  Called by VoiceOrchestrator.processCallSummary().
+     *
+     * Returns the formatted summary string, or the raw [transcript] on failure so
+     * the user always hears something.
      */
-    private fun resolveViaBackend(utterance: String, sessionId: String): ResolvedIntent? {
-        return try {
-            val body = JSONObject().put("goal", utterance).toString()
-                .toRequestBody("application/json".toMediaType())
-            val request = Request.Builder()
-                .url("${BuildConfig.BACKEND_URL}/agent/plan")
-                .post(body)
-                .addHeader("X-Session-ID", sessionId)  // ties to the session-keyed agent (commit 3)
-                .build()
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) return null
-            val json = JSONObject(response.body?.string() ?: return null)
-            val steps = json.optJSONArray("steps")
-            val narration = json.optString("narration", "")
-            ResolvedIntent(
-                action = "BACKEND_PLAN",
-                params = mapOf(
-                    "goal" to utterance,
-                    "sessionId" to json.optString("sessionId", sessionId),
-                    "firstStep" to (steps?.optString(0) ?: "")
-                ),
-                narration = narration,
-                confidence = 0.95f   // backend plans are considered high-confidence
-            )
+    suspend fun formatCallSummary(transcript: String): String = withContext(Dispatchers.IO) {
+        try {
+            val prompt = buildString {
+                append("The user just finished a phone call and dictated these notes: ")
+                append(transcript)
+                append("\nReformat this into 2-4 concise spoken bullet points summarising the key ")
+                append("outcomes and any action items. Use plain language suitable for TTS. ")
+                append("Start each point with a number, e.g. 'One: ...'. ")
+                append("Return ONLY the formatted text with no extra commentary.")
+            }
+            val response = model.generateContent(content { text(prompt) })
+            response.text?.trim()?.ifBlank { transcript } ?: transcript
         } catch (e: Exception) {
-            null
+            Log.w(TAG, "formatCallSummary failed: ${e.message}")
+            transcript
         }
     }
+
+    // ── JSON parsing ─────────────────────────────────────────────────────────
 
     private fun parseJson(json: String): ResolvedIntent {
         return try {
@@ -156,8 +172,7 @@ Rules:
                 .findAll(clean)
                 .forEach { params[it.groupValues[1]] = it.groupValues[2] }
 
-            // Gap 4 — if confidence is below threshold, synthesise a confirmation question
-            // even if Gemini didn't return one, so low-confidence intents never execute silently.
+            // Gap 4 — synthesise a confirmation question for low-confidence intents
             val effectiveConfirmation = if (confidence < CONFIDENCE_THRESHOLD && confirmation.isBlank()) {
                 "I think you want me to ${action.lowercase().replace("_", " ")} — is that right?"
             } else {
@@ -171,7 +186,7 @@ Rules:
     }
 
     private fun unknownIntent() = ResolvedIntent(
-        action = "UNKNOWN",
+        action    = "UNKNOWN",
         narration = "I didn't quite catch that. Could you say that again?",
         confidence = 0.0f
     )

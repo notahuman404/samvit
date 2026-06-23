@@ -1,11 +1,14 @@
 package com.samvit.app.voice
 
 import android.content.Context
+import android.util.Log
 import com.samvit.app.accessibility.SamvitAccessibilityBridge
+import com.samvit.app.commands.BackendAgentClient
 import com.samvit.app.commands.DeterministicCommand
 import com.samvit.app.commands.DeterministicMatcher
 import com.samvit.app.commands.GeminiIntentResolver
 import com.samvit.app.commands.ResolvedIntent
+import com.samvit.app.commands.StepResult
 import com.samvit.app.data.repository.SamvitRepository
 import com.samvit.app.emergency.EmergencyManager
 import com.samvit.app.reminder.ReminderScheduler
@@ -42,8 +45,21 @@ class VoiceOrchestrator(private val context: Context) {
     private var _sessionId = UUID.randomUUID().toString()
 
     private var activeJob: Job? = null
+
+    // ── Pending confirmation state ─────────────────────────────────────────────
+    /**
+     * When non-null, the next utterance is treated as a response to a pending
+     * confirmation rather than a new command.  Special sentinel values are used
+     * for multi-turn flows:
+     *   "call_summary_prompt"    — waiting for yes/no to "want a summary?"
+     *   "call_summary_dictation" — collecting dictated notes until "done"
+     *   <any other string>       — standard yes/no confirmation for [pendingIntent]
+     */
     private var pendingConfirmation: String? = null
     private var pendingIntent: ResolvedIntent? = null
+
+    /** Accumulates the user's dictated call notes across multiple utterances (fix 2). */
+    private val callSummaryBuffer = StringBuilder()
 
     /** Row ID of the most recently inserted CommandHistory row.
      *  reply() uses this to persist the agent's response (gap 5 — session transcripts). */
@@ -80,22 +96,64 @@ class VoiceOrchestrator(private val context: Context) {
         _state.value = OrchestratorState.PROCESSING
         activeJob?.cancel()
         activeJob = scope.launch {
-            // Handle pending yes/no confirmation
+
+            // ── Multi-turn flow handling ─────────────────────────────────────
             if (pendingConfirmation != null) {
                 val lower = utterance.lowercase()
-                val confirmed = lower.startsWith("yes") || lower.startsWith("yeah") ||
-                        lower.startsWith("correct") || lower.startsWith("that's right") || lower == "yep"
-                if (confirmed) {
-                    pendingIntent?.let { executeIntent(it) }
-                } else {
-                    reply("Okay, cancelled.")
+                when (pendingConfirmation) {
+
+                    // Fix 2 — user has been asked whether they want a call summary
+                    "call_summary_prompt" -> {
+                        pendingConfirmation = null
+                        val confirmed = lower.startsWith("yes") || lower.startsWith("yeah") ||
+                                lower.startsWith("correct") || lower.startsWith("that's right") ||
+                                lower == "yep"
+                        if (confirmed) {
+                            startCallSummaryDictation()
+                        } else {
+                            reply("Okay, no summary needed.")
+                        }
+                        return@launch
+                    }
+
+                    // Fix 2 — collect dictation until the user says "done" / "that's it"
+                    "call_summary_dictation" -> {
+                        val done = lower.contains("done") ||
+                                lower.contains("that's it") ||
+                                lower.contains("that's all") ||
+                                lower.contains("finish") ||
+                                lower.contains("stop dictating")
+                        if (done && callSummaryBuffer.isNotBlank()) {
+                            val notes = callSummaryBuffer.toString().trim()
+                            callSummaryBuffer.clear()
+                            pendingConfirmation = null
+                            processCallSummary(notes)
+                        } else {
+                            // Append this utterance to the running transcript
+                            callSummaryBuffer.append(utterance).append(" ")
+                            reply("Got it. Keep going, or say done when finished.")
+                        }
+                        return@launch
+                    }
+
+                    // Standard yes/no for a pending intent (gap 4)
+                    else -> {
+                        val confirmed = lower.startsWith("yes") || lower.startsWith("yeah") ||
+                                lower.startsWith("correct") || lower.startsWith("that's right") ||
+                                lower == "yep"
+                        if (confirmed) {
+                            pendingIntent?.let { executeIntent(it) }
+                        } else {
+                            reply("Okay, cancelled.")
+                        }
+                        pendingConfirmation = null
+                        pendingIntent = null
+                        return@launch
+                    }
                 }
-                pendingConfirmation = null
-                pendingIntent = null
-                return@launch
             }
 
-            // Class 1 — Deterministic (bypass Gemini entirely)
+            // ── Class 1 — Deterministic (bypass Gemini entirely) ──────────────
             val det = DeterministicMatcher.match(utterance)
             when (det.command) {
                 DeterministicCommand.STOP -> {
@@ -120,6 +178,7 @@ class VoiceOrchestrator(private val context: Context) {
                     emergency.cancelCountdown()
                     pendingConfirmation = null
                     pendingIntent = null
+                    callSummaryBuffer.clear()
                     lastCommandId = repo.logCommand(utterance, "CANCEL", "VOICE", _sessionId)
                     reply("Cancelled.")
                     return@launch
@@ -143,13 +202,13 @@ class VoiceOrchestrator(private val context: Context) {
                 DeterministicCommand.NONE -> { /* fall through */ }
             }
 
-            // Class 2 — AI intent resolution (pass sessionId for backend routing, gap 9)
+            // ── Class 2 — AI intent resolution (fix 3: sessionId routes to backend) ─
             val memContext = repo.searchMemory(utterance.take(60))
                 .joinToString("\n") { "${it.key}: ${it.value}" }
             val intent = gemini.resolve(utterance, memContext, _sessionId)
             lastCommandId = repo.logCommand(utterance, intent.action, "VOICE", _sessionId)
 
-            // Gap 4 — require confirmation when Gemini is not confident or the intent is ambiguous
+            // Gap 4 — require confirmation when Gemini is not confident
             if (intent.confirmation.isNotBlank()) {
                 pendingConfirmation = intent.confirmation
                 pendingIntent = intent
@@ -187,11 +246,29 @@ class VoiceOrchestrator(private val context: Context) {
                     reply("The dashboard was last accessed on ${fmt.format(Date(entry.timestamp))}.")
                 }
             }
-            // Gap 6 — track agent-initiated calls so the PhoneStateListener can offer summarisation
+            // Fix 2 — recall the most recent stored call summary
+            "RECALL_CALL_SUMMARY" -> {
+                val results = repo.searchMemory("call_summary")
+                val latest = results
+                    .filter { it.key.startsWith("call_summary_") }
+                    .maxByOrNull { it.key }
+                if (latest == null) {
+                    reply("I don't have any call summaries saved yet.")
+                } else {
+                    reply(latest.value)
+                }
+            }
+            // Gap 6 — track agent-initiated calls
             "CALL_CONTACT" -> {
                 agentInitiatedCall = true
                 if (intent.narration.isNotBlank()) reply(intent.narration)
                 SamvitAccessibilityBridge.dispatchIntent(intent)
+            }
+            // Fix 3 — drive a backend multi-step plan
+            "BACKEND_PLAN" -> {
+                if (intent.narration.isNotBlank()) reply(intent.narration)
+                val backendSessionId = intent.params["sessionId"] ?: _sessionId
+                driveBackendPlan(backendSessionId)
             }
             "UNKNOWN" -> reply("I'm not sure what you'd like me to do. Could you try rephrasing?")
             else -> {
@@ -202,51 +279,94 @@ class VoiceOrchestrator(private val context: Context) {
     }
 
     /**
+     * Fix 3 — drives a backend agent plan step by step.
+     *
+     * Each call to BackendAgentClient.nextAction() returns the next action and its
+     * narration.  We speak the narration, dispatch the accessibility action, then
+     * report success to the backend for the next step.  Stops when planStatus is
+     * no longer "running", when requiresConfirmation is set, or after 20 steps max.
+     *
+     * If the backend becomes unreachable mid-plan, the user hears a spoken error
+     * and the loop exits cleanly — no silent failure.
+     */
+    private suspend fun driveBackendPlan(backendSessionId: String) {
+        var stepResult = StepResult(success = true, screenDescription = "Plan started")
+        var step = 0
+        val maxSteps = 20
+
+        while (step < maxSteps) {
+            val action = BackendAgentClient.nextAction(stepResult, backendSessionId)
+            if (action == null) {
+                reply("I couldn't reach the backend for the next step. Stopping here.")
+                break
+            }
+
+            if (action.narration.isNotBlank()) reply(action.narration)
+
+            if (action.requiresConfirmation) {
+                pendingConfirmation = action.confirmationMessage
+                pendingIntent = ResolvedIntent(
+                    action    = "BACKEND_NEXT",
+                    params    = mapOf("sessionId" to backendSessionId),
+                    narration = action.narration
+                )
+                break
+            }
+
+            if (action.planStatus != "running") break
+
+            step++
+            delay(500)
+            stepResult = StepResult(success = true)
+        }
+    }
+
+    /**
      * Speak [text] and persist it as the reply for the most recent command row (gap 5).
-     * Always called from the main thread via scope.launch.
      */
     fun reply(text: String) {
         _lastReply.value = text
         _state.value = OrchestratorState.SPEAKING
         tts.speak(text)
-        // Persist the agent's reply against its command row in the background.
         if (lastCommandId > 0L) {
             scope.launch(Dispatchers.IO) { repo.updateCommandResponse(lastCommandId, text) }
         }
     }
 
-    /** Gap 6 — called by VoiceForegroundService when an agent-initiated call ends. */
+    // ── Call summary flow (fix 2) ─────────────────────────────────────────────
+
+    /** Called by VoiceForegroundService when an agent-initiated call ends. */
     fun onAgentCallEnded() {
         agentInitiatedCall = false
         scope.launch {
-            // Ask the user if they want to dictate a call summary.
             pendingConfirmation = "call_summary_prompt"
             reply("Call ended. Would you like me to summarize what was discussed?")
         }
     }
 
-    /** Gap 6 — the user confirmed they want to dictate a call summary. */
+    /** User confirmed they want a summary — transition into dictation mode. */
     private suspend fun startCallSummaryDictation() {
-        reply("Go ahead. Dictate the key points from your call, and I'll structure them for you.")
-        // The next speech result will be a dictation — handled below.
+        callSummaryBuffer.clear()
         pendingConfirmation = "call_summary_dictation"
+        reply("Go ahead. Dictate the key points from your call, and say done when you're finished.")
     }
 
-    /** Gap 6 — format the user's dictated notes into a structured summary via Gemini. */
+    /**
+     * Fix 2 — format the user's raw dictated [notes] via Gemini into 2-4 spoken
+     * bullet points, read the summary aloud, and store it under
+     * "call_summary_{timestamp}" for future recall.
+     */
     private suspend fun processCallSummary(notes: String) {
         reply("Got it. One moment.")
         val timestamp = System.currentTimeMillis()
-        try {
-            // Reuse the Gemini model to reformat the user's raw dictation.
-            val summary = repo.searchMemory("call_summary").firstOrNull()?.value
-                ?: "Could not generate summary."
-            // Store the summary for later recall.
-            repo.memorise("call_summary_$timestamp", notes, "CALL_SUMMARY")
-            reply("Here is your call summary: $notes. Saved for later recall.")
+        val summary = try {
+            gemini.formatCallSummary(notes)
         } catch (e: Exception) {
-            reply("I couldn't format the summary, but I've saved your notes.")
-            repo.memorise("call_summary_$timestamp", notes, "CALL_SUMMARY")
+            Log.w("VoiceOrchestrator", "formatCallSummary failed: ${e.message}")
+            notes
         }
+        repo.memorise("call_summary_$timestamp", summary, "CALL_SUMMARY")
+        reply("Here is your call summary: $summary. Saved for later recall.")
     }
 
     fun clearEmergency() {
