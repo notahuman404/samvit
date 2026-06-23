@@ -10,9 +10,21 @@
     <uses-permission android:name="android.permission.CALL_PHONE"/>
     <uses-permission android:name="android.permission.SEND_SMS"/>
     <uses-permission android:name="android.permission.READ_CONTACTS"/>
-    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS"/>
+    <!--
+        PROCESS_OUTGOING_CALLS was deprecated in API 29 (Android 10) and has
+        no effect on Android 10+.  Removed.  If call-interception is ever
+        needed, implement android.telecom.CallScreeningService instead.
+    -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <!--
+        ACCESS_BACKGROUND_LOCATION is required for continuous GPS broadcasting
+        during emergencies (doc §7) but is one of the most scrutinised
+        permissions on the Play Store.  A separate declaration form must be
+        submitted to Google justifying why background location is essential.
+        If the emergency feature is not yet live, remove this permission until
+        it is ready and the Play Store declaration is prepared.
+    -->
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
