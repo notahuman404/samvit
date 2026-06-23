@@ -161,8 +161,9 @@ class EmergencyManager(
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
             try {
                 cameraProvider.unbindAll()
+                val lifecycleOwner = context as? LifecycleOwner ?: return@addListener
                 cameraProvider.bindToLifecycle(
-                    context as LifecycleOwner,
+                    lifecycleOwner,
                     selector,
                     imageAnalysis
                 )
@@ -173,10 +174,10 @@ class EmergencyManager(
     }
 
     private fun imageProxyToBytes(imageProxy: ImageProxy): ByteArray {
-        val buffer: ByteBuffer = imageProxy.planes[0].buffer
-        val bytes = ByteArray(buffer.remaining())
-        buffer.get(bytes)
-        return bytes
+        val bitmap = imageProxy.toBitmap()
+        val stream = java.io.ByteArrayOutputStream()
+        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, stream)
+        return stream.toByteArray()
     }
 
     /**
