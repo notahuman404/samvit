@@ -5,6 +5,7 @@
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 
 namespace vest {
 
@@ -32,10 +33,20 @@ void RealSenseCamera::stop() {
 }
 
 DepthGrid RealSenseCamera::read_grid() {
-    std::lock_guard<std::mutex> lk(mtx_);
-    if (!has_frame_)
-        throw std::runtime_error(name_ + ": no frame captured yet");
-    return latest_grid_;
+    // Wait up to 500 ms for the capture thread to deliver the first frame
+    // rather than throwing immediately.  Callers that invoke read_grid()
+    // right after start() would otherwise crash the pipeline before any
+    // frame has been captured.
+    constexpr int kMaxWaitMs = 500;
+    constexpr int kSleepMs   = 10;
+    for (int waited = 0; waited < kMaxWaitMs; waited += kSleepMs) {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (has_frame_) return latest_grid_;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kSleepMs));
+    }
+    throw std::runtime_error(name_ + ": no frame received within 500 ms of start()");
 }
 
 void RealSenseCamera::capture_loop() {
@@ -120,13 +131,11 @@ DepthGrid fuse_depth_grids(const DepthGrid& upper, const DepthGrid& lower) {
             float l = lower[idx];
 
             if (upper_covers && lower_covers) {
-                // Overlap: min-distance, treating 0 as "no data"
                 bool u_ok = u > 0.0f;
                 bool l_ok = l > 0.0f;
                 if (u_ok && l_ok)       fused[idx] = std::min(u, l);
                 else if (u_ok)          fused[idx] = u;
                 else if (l_ok)          fused[idx] = l;
-                // else stays 0
             } else if (upper_covers) {
                 fused[idx] = u;
             } else if (lower_covers) {

@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <vector>
 
 namespace vest {
 
@@ -42,11 +43,18 @@ void LinuxI2CBus::write_byte_data(uint8_t addr, uint8_t reg, uint8_t value) {
 }
 
 void LinuxI2CBus::raw_write(uint8_t addr, const std::vector<uint8_t>& data) {
+    // Copy payload into a local mutable buffer.
+    // The original code used const_cast<uint8_t*>(data.data()) directly in
+    // the i2c_msg, which is undefined behaviour: some kernel I2C drivers
+    // write into the buffer for DMA alignment, so const_cast on a truly
+    // const pointer can corrupt read-only memory.
+    std::vector<uint8_t> buf(data);
+
     struct i2c_msg msg{};
     msg.addr  = addr;
     msg.flags = 0;
-    msg.len   = static_cast<uint16_t>(data.size());
-    msg.buf   = const_cast<uint8_t*>(data.data());
+    msg.len   = static_cast<uint16_t>(buf.size());
+    msg.buf   = buf.data();
 
     struct i2c_rdwr_ioctl_data packets{};
     packets.msgs  = &msg;
@@ -81,11 +89,11 @@ std::pair<int, int> motor_to_board_channel(int motor_idx) {
 }
 
 void init_board(I2CBus& bus, int board_idx) {
-    // PCA9685 init: sleep → set prescale → wake with AI + ALLCALL (bug #12 fix)
+    // PCA9685 init: sleep → set prescale → wake with AI + ALLCALL
     uint8_t addr = board_address(board_idx);
     bus.write_byte_data(addr, REG_MODE1, MODE1_SLEEP | MODE1_ALLCALL);
     bus.write_byte_data(addr, REG_PRE_SCALE, PRESCALE_200HZ);
-    bus.write_byte_data(addr, REG_MODE1, MODE1_AI | MODE1_ALLCALL);  // SLEEP=0, AI=1, ALLCALL=1
+    bus.write_byte_data(addr, REG_MODE1, MODE1_AI | MODE1_ALLCALL);
 }
 
 void init_all_boards(I2CBus& bus) {
@@ -101,7 +109,7 @@ std::vector<uint8_t> build_board_payload(const uint16_t* channels_16) {
     // Leading register byte + 16 channels × 4 bytes = 65 bytes total.
     std::vector<uint8_t> payload;
     payload.reserve(1 + CHANNELS_PER_BOARD * 4);
-    payload.push_back(REG_LED0_ON_L);  // auto-increment starts here
+    payload.push_back(REG_LED0_ON_L);
 
     for (int ch = 0; ch < CHANNELS_PER_BOARD; ++ch) {
         uint16_t off = intensity_to_off_count(static_cast<int>(channels_16[ch]));
