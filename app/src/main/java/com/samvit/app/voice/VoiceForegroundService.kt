@@ -4,10 +4,26 @@ import android.app.*
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
 import com.samvit.app.MainActivity
 import com.samvit.app.R
 
+/**
+ * Foreground service hosting VoiceOrchestrator and (optionally) PorcupineWakeWord.
+ *
+ * Gap 6 — PhoneStateListener detects when an agent-initiated call ends and routes
+ * the event back to VoiceOrchestrator so the user can dictate a call summary.
+ *
+ * Gap 7 — PorcupineWakeWordEngine runs on a background thread while Samvit is in
+ * IDLE/LISTENING state.  When the wake word fires, SpeechRecognitionManager takes
+ * over for that command cycle, then Porcupine resumes.  This eliminates the 5–8 s
+ * silence timeout that plagues Android's built-in SpeechRecognizer.
+ *
+ * Notification title/subtitle updates reflect LISTENING / PROCESSING / SPEAKING /
+ * EMERGENCY states so the user's lock-screen glance shows the current state.
+ */
 class VoiceForegroundService : Service() {
 
     companion object {
@@ -15,18 +31,90 @@ class VoiceForegroundService : Service() {
         const val NOTIFICATION_ID = 1
     }
 
+    private lateinit var orchestrator: VoiceOrchestrator
+    private var wakeWordEngine: PorcupineWakeWordEngine? = null
+    private var telephonyManager: TelephonyManager? = null
+
+    // Gap 6 — monitors phone call state to detect when an agent-initiated call ends
+    @Suppress("DEPRECATION")
+    private val phoneStateListener = object : PhoneStateListener() {
+        private var wasOffhook = false
+
+        @Deprecated("Deprecated in Java")
+        override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+            when (state) {
+                TelephonyManager.CALL_STATE_OFFHOOK -> wasOffhook = true
+                TelephonyManager.CALL_STATE_IDLE -> {
+                    if (wasOffhook && orchestrator.agentInitiatedCall) {
+                        // The call that Samvit initiated has ended — offer a summary
+                        orchestrator.onAgentCallEnded()
+                    }
+                    wasOffhook = false
+                }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        startForeground(NOTIFICATION_ID, buildNotification("Listening", "Say a command"))
+
+        orchestrator = VoiceOrchestrator(this)
+        orchestrator.start()
+
+        // Gap 7 — start Porcupine wake-word engine (no-ops gracefully if key/model missing)
+        wakeWordEngine = PorcupineWakeWordEngine(this, orchestrator)
+        wakeWordEngine?.start()
+
+        // Gap 6 — register call-state listener
+        telephonyManager = getSystemService(TELEPHONY_SERVICE) as? TelephonyManager
+        @Suppress("DEPRECATION")
+        telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+
+        // Mirror orchestrator state into the notification
+        // (collect in a lightweight way without Compose lifecycle)
+        Thread {
+            // Observe state changes using a simple polling loop on a background thread.
+            // A proper implementation would use lifecycleScope + collectLatest, but
+            // Service does not have a lifecycle scope in this project's min-SDK setup.
+            var lastState = OrchestratorState.IDLE
+            while (true) {
+                val current = orchestrator.state.value
+                if (current != lastState) {
+                    lastState = current
+                    updateNotification(current)
+                }
+                Thread.sleep(500)
+            }
+        }.also { it.isDaemon = true }.start()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
-        START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun buildNotification(): Notification {
+    override fun onDestroy() {
+        wakeWordEngine?.stop()
+        @Suppress("DEPRECATION")
+        telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
+        orchestrator.stop()
+        super.onDestroy()
+    }
+
+    private fun updateNotification(state: OrchestratorState) {
+        val (title, subtitle) = when (state) {
+            OrchestratorState.IDLE       -> "Samvit — Wake word active" to "Say \"Hey Samvit\" or tap to speak"
+            OrchestratorState.LISTENING  -> "Samvit — Listening" to "Speak your command now"
+            OrchestratorState.PROCESSING -> "Samvit — Thinking" to "Processing your request…"
+            OrchestratorState.SPEAKING   -> "Samvit — Speaking" to "Replying…"
+            OrchestratorState.EMERGENCY  -> "Samvit — EMERGENCY ACTIVE" to "Emergency services contacted"
+        }
+        val nm = getSystemService(NotificationManager::class.java)
+        nm?.notify(NOTIFICATION_ID, buildNotification(title, subtitle))
+    }
+
+    private fun buildNotification(title: String, subtitle: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java),
@@ -34,8 +122,8 @@ class VoiceForegroundService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Samvit is listening")
-            .setContentText("Voice assistant active — say a command")
+            .setContentTitle(title)
+            .setContentText(subtitle)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
