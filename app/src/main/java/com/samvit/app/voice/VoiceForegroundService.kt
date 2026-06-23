@@ -18,8 +18,11 @@ import com.samvit.app.R
  *
  * Gap 7 — PorcupineWakeWordEngine runs on a background thread while Samvit is in
  * IDLE/LISTENING state.  When the wake word fires, SpeechRecognitionManager takes
- * over for that command cycle, then Porcupine resumes.  This eliminates the 5–8 s
- * silence timeout that plagues Android's built-in SpeechRecognizer.
+ * over for that command cycle, then Porcupine resumes.
+ *
+ * Fix 4 — if Porcupine cannot start (missing AccessKey or .ppn model), the engine
+ * calls the [onFallback] lambda which speaks a warning via TTS so the user
+ * understands they must wait for Samvit to finish speaking before it can hear them.
  *
  * Notification title/subtitle updates reflect LISTENING / PROCESSING / SPEAKING /
  * EMERGENCY states so the user's lock-screen glance shows the current state.
@@ -46,7 +49,6 @@ class VoiceForegroundService : Service() {
                 TelephonyManager.CALL_STATE_OFFHOOK -> wasOffhook = true
                 TelephonyManager.CALL_STATE_IDLE -> {
                     if (wasOffhook && orchestrator.agentInitiatedCall) {
-                        // The call that Samvit initiated has ended — offer a summary
                         orchestrator.onAgentCallEnded()
                     }
                     wasOffhook = false
@@ -63,8 +65,17 @@ class VoiceForegroundService : Service() {
         orchestrator = VoiceOrchestrator(this)
         orchestrator.start()
 
-        // Gap 7 — start Porcupine wake-word engine (no-ops gracefully if key/model missing)
-        wakeWordEngine = PorcupineWakeWordEngine(this, orchestrator)
+        // Gap 7 / Fix 4 — start Porcupine; pass a TTS fallback so the user hears a warning
+        // if the engine is unavailable instead of silently degrading.
+        wakeWordEngine = PorcupineWakeWordEngine(
+            context      = this,
+            orchestrator = orchestrator,
+            onFallback   = { message ->
+                // Speak the warning via the orchestrator TTS.
+                // orchestrator.start() has already initialised TTS by this point.
+                orchestrator.tts.speak(message)
+            }
+        )
         wakeWordEngine?.start()
 
         // Gap 6 — register call-state listener
@@ -72,12 +83,8 @@ class VoiceForegroundService : Service() {
         @Suppress("DEPRECATION")
         telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
 
-        // Mirror orchestrator state into the notification
-        // (collect in a lightweight way without Compose lifecycle)
+        // Mirror orchestrator state into the notification via a lightweight polling thread.
         Thread {
-            // Observe state changes using a simple polling loop on a background thread.
-            // A proper implementation would use lifecycleScope + collectLatest, but
-            // Service does not have a lifecycle scope in this project's min-SDK setup.
             var lastState = OrchestratorState.IDLE
             while (true) {
                 val current = orchestrator.state.value
