@@ -8,7 +8,10 @@ data class CommandHistory(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val utterance: String,
     val resolvedAction: String,
-    val category: String, // VOICE, EMERGENCY, REMINDER, BROADCAST, CALL
+    /** VOICE, EMERGENCY, REMINDER, BROADCAST, CALL, DASHBOARD_ACCESS */
+    val category: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val sessionId: String
+    val sessionId: String,
+    /** The TTS string Samvit spoke in reply; null until reply() is called. */
+    val responseText: String? = null
 )

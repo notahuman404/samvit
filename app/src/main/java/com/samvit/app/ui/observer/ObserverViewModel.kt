@@ -8,6 +8,7 @@ import com.samvit.app.data.repository.SamvitRepository
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 class ObserverViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = SamvitRepository(app)
@@ -24,6 +25,20 @@ class ObserverViewModel(app: Application) : AndroidViewModel(app) {
     val memory = repo.getMemory()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** Gap 3 — all DASHBOARD_ACCESS entries for the audit sub-tab. */
+    val auditLog = repo.getAuditLog()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * Gap 3 — insert an audit record every time the observer screen is successfully
+     * authenticated and opened.  Call this from ObserverScreen once biometric auth passes.
+     */
+    fun logDashboardAccess() {
+        viewModelScope.launch {
+            repo.logDashboardAccess(sessionId = UUID.randomUUID().toString())
+        }
+    }
+
     fun addContact(name: String, phone: String, allowCamera: Boolean) {
         viewModelScope.launch {
             repo.addContact(TrustedContact(name = name, phone = phone, allowCameraStream = allowCamera))
@@ -39,12 +54,6 @@ class ObserverViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteMemory(entry: MemoryEntry) {
-        viewModelScope.launch { repo.db_deleteMemory(entry) }
+        viewModelScope.launch { repo.deleteMemory(entry) }
     }
-}
-
-// Extension to expose deleteMemory on the repo
-private suspend fun SamvitRepository.db_deleteMemory(entry: MemoryEntry) {
-    // We expose via the repo's internal db reference through the extension
-    // This is a simple delegation pattern to keep the public API clean
 }

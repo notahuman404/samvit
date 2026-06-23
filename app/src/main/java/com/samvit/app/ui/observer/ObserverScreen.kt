@@ -27,15 +27,20 @@ fun ObserverScreen(
     viewModel: ObserverViewModel,
     onBack: () -> Unit
 ) {
+    // Gap 3 — log this dashboard access once when the composable first enters the composition.
+    LaunchedEffect(Unit) { viewModel.logDashboardAccess() }
+
     val commands by viewModel.commands.collectAsState()
     val reminders by viewModel.reminders.collectAsState()
     val contacts  by viewModel.contacts.collectAsState()
     val memory    by viewModel.memory.collectAsState()
+    val auditLog  by viewModel.auditLog.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAddContact by remember { mutableStateOf(false) }
 
-    val tabs = listOf("Activity", "Reminders", "Contacts", "Memory")
+    // Gap 3 — added "Audit" tab so the observer can see when the dashboard was accessed.
+    val tabs = listOf("Activity", "Reminders", "Contacts", "Memory", "Audit")
 
     Scaffold(
         topBar = {
@@ -105,6 +110,7 @@ fun ObserverScreen(
                 1 -> ReminderList(reminders, onDelete = viewModel::deleteReminder)
                 2 -> ContactList(contacts, onDelete = viewModel::deleteContact)
                 3 -> MemoryList(memory)
+                4 -> AuditLogList(auditLog)  // Gap 3
             }
         }
     }
@@ -137,14 +143,20 @@ private fun ActivityFeed(commands: List<CommandHistory>) {
     }
 }
 
+/**
+ * Gap 5 — two-line transcript layout: utterance (user) on top in white, agent
+ * reply below in muted colour.  The reply is null until VoiceOrchestrator.reply()
+ * has persisted it, so we hide the reply row when it's blank.
+ */
 @Composable
 private fun ActivityEntry(entry: CommandHistory, fmt: SimpleDateFormat) {
     val glyph = when (entry.category) {
-        "EMERGENCY" -> "\uD83D\uDEA8"
-        "REMINDER"  -> "\u23F0"
-        "BROADCAST" -> "\uD83D\uDCCD"
-        "CALL"      -> "\uD83D\uDCDE"
-        else        -> "\uD83C\uDF99\uFE0F"
+        "EMERGENCY"        -> "\uD83D\uDEA8"
+        "REMINDER"         -> "\u23F0"
+        "BROADCAST"        -> "\uD83D\uDCCD"
+        "CALL"             -> "\uD83D\uDCDE"
+        "DASHBOARD_ACCESS" -> "\uD83D\uDD12"
+        else               -> "\uD83C\uDF99\uFE0F"
     }
     Card(
         colors = CardDefaults.cardColors(containerColor = SamvitSurface),
@@ -157,24 +169,72 @@ private fun ActivityEntry(entry: CommandHistory, fmt: SimpleDateFormat) {
         ) {
             Text(glyph, fontSize = 18.sp)
             Column(modifier = Modifier.weight(1f)) {
+                // User's utterance — white so it reads as primary
                 Text(
                     entry.utterance,
                     color = SamvitText,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Normal
                 )
+                // Resolved action in monospace — secondary info
                 Text(
                     entry.resolvedAction,
                     color = SamvitSubtext,
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace
                 )
+                // Gap 5 — agent reply, shown in muted colour beneath the utterance
+                if (!entry.responseText.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "↳ ${entry.responseText}",
+                        color = SamvitAccent.copy(alpha = 0.75f),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Light
+                    )
+                }
             }
             Text(
                 fmt.format(Date(entry.timestamp)),
                 color = SamvitSubtext,
                 fontSize = 10.sp
             )
+        }
+    }
+}
+
+/** Gap 3 — audit log tab showing every dashboard access with timestamp. */
+@Composable
+private fun AuditLogList(entries: List<CommandHistory>) {
+    val fmt = remember { SimpleDateFormat("dd MMM yyyy, HH:mm:ss", Locale.getDefault()) }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (entries.isEmpty()) {
+            item { EmptyState("Dashboard has not been accessed yet") }
+        }
+        items(entries) { entry ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SamvitSurface),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("\uD83D\uDD12", fontSize = 18.sp)
+                    Column(Modifier.weight(1f)) {
+                        Text("Dashboard accessed", color = SamvitText, fontSize = 14.sp)
+                        Text(
+                            fmt.format(Date(entry.timestamp)),
+                            color = SamvitSubtext, fontSize = 11.sp, fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
         }
     }
 }
