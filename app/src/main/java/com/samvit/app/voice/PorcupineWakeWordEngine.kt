@@ -87,14 +87,28 @@ class PorcupineWakeWordEngine(
             try {
                 val frameLength = engine.frameLength
                 val sampleRate = engine.sampleRate
+                val minBufferSize = android.media.AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    android.media.AudioFormat.CHANNEL_IN_MONO,
+                    android.media.AudioFormat.ENCODING_PCM_16BIT
+                )
+                val bufferSize = maxOf(frameLength * 2, minBufferSize)
                 val recorder = android.media.AudioRecord(
                     android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION,
                     sampleRate,
                     android.media.AudioFormat.CHANNEL_IN_MONO,
                     android.media.AudioFormat.ENCODING_PCM_16BIT,
-                    frameLength * 2
+                    bufferSize
                 )
+                if (recorder.state != android.media.AudioRecord.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioRecord failed to initialize")
+                    return@Thread
+                }
                 recorder.startRecording()
+                if (recorder.recordingState != android.media.AudioRecord.RECORDSTATE_RECORDING) {
+                    Log.e(TAG, "AudioRecord failed to start recording")
+                    return@Thread
+                }
                 val frame = ShortArray(frameLength)
 
                 while (running) {
