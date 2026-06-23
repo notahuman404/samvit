@@ -1,0 +1,25 @@
+Reference,Description,Manufacturer,MPN,Qty,Unit Price USD (est.),Extended USD (est.),Digikey PN,Mouser PN,Notes
+U1,Raspberry Pi 4 Model B 4GB,Raspberry Pi Foundation,SC0194,1,55.00,55.00,2648-SC0194-ND,,Official board; 4 GB required for RealSense workload
+CAM1-CAM2,Intel RealSense Depth Camera D435i,Intel,82635AWG,2,199.00,398.00,,,USB 3.2 Gen 1; includes factory IMU
+PWM1-PWM9,PCA9685 16-Ch 12-bit I2C PWM/Servo Driver Board,NXP (Adafruit breakout),PCA9685,9,7.95,71.55,,,Adafruit #815 or equivalent; solder address jumpers
+Q1-Q144,N-Channel MOSFET 30V 4A SOT-23,AOS,AO3400A,144,0.12,17.28,AO3400A-ND,863-AO3400A,Vgs(th) max 1.45V; logic-level gate drive from PCA9685 OK
+D1-D144,Fast-Switching Rectifier Diode SOD-323,Vishay,1N4148WS-7-F,144,0.03,4.32,1N4148WS-FDICT-ND,78-1N4148WS-7-F,Flyback protection across motor; 75V 150mA
+M1-M144,Coin Vibration Motor 10mm 3V ERM,Precision Microdrives,310-113,144,2.50,360.00,,,3V 80mA typ; 12000 RPM; 2g amplitude; 0.95g centrifugal
+R1-R144,Resistor 220Ω 0402 1/16W 1%,Yageo,RC0402FR-07220RL,144,0.01,1.44,311-220LRCT-ND,652-RC0402FR-07220RL,Gate series resistor; limits dV/dt and short-circuit current
+U2,I2S Audio Amplifier Breakout MAX98357A,Maxim (Adafruit breakout),MAX98357AEWL,1,5.95,5.95,,,Adafruit #3006; I2S input; 3.2W into 4Ω
+SP1,"Speaker 8Ω 3W 40mm Round",CUI Devices,CMS-40038-L152,1,3.50,3.50,CMS-40038-L152-ND,,Shoulder-mount; rated 3W continuous
+J1-J9,JST-XH 4-Pin Right-Angle Through-Hole Header,JST,B4B-XH-A,9,0.35,3.15,455-2249-ND,538-B4B-XH-A,I2C chain daisy-chain; 5V/GND/SDA/SCL
+J10-J153,JST-SH 2-Pin Horizontal SMD Header,JST,SM02B-SRSS-TB,144,0.28,40.32,455-1793-ND,538-SM02B-SRSS-TB,Motor harness; +/- per motor
+CABLE1-CABLE2,USB 3.2 Gen1 Type-A to Type-A 1m,Belkin or equiv,,2,5.00,10.00,,,D435i to Pi USB3 port
+CABLE3,USB-C PD Trigger + 20V→5V 8A Buck Module (PD decoy),Witrn or equiv,C2PD-8A,1,11.00,11.00,,,Negotiates 20V PD then bucks to 5V/8A (40W); must cover ~31W (≈6.3A) system peak — a bare 5V/5A trigger is undersized
+REG1,DC-DC Buck Converter 5V→3V 5A,MINI560 or MP1584 module,,1,3.50,3.50,,,3V motor rail; adjustable; set output with trim pot
+CAP1-CAP9,Electrolytic Capacitor 100µF 16V,Panasonic,EEU-FM1C101,9,0.18,1.62,P15381CT-ND,667-EEU-FM1C101,Bulk decoupling per PCA9685 board VCC
+CAP10-CAP153,Ceramic Capacitor 100nF 0402 50V,Yageo,CC0402KRX5R9BB104,144,0.02,2.88,311-1266-1-ND,603-CC0402KRX5R9BB104,Local decoupling per MOSFET drain-side
+BANK1,Power Bank 65W USB-C PD 26800mAh,Anker 737 or UGREEN 25000,,1,89.99,89.99,,,65W PD output; ≥20000mAh; two USB-C ports preferred
+PCB1,Custom MOSFET driver PCB (or perf board for proto),,,,,,,,See motor-driver-cell.md for schematic
+VEST1,Tactical vest or compression vest base,,,,1,30.00,30.00,,,Rigid enough to hold motors in a flat 12×12 grid
+MISC,Hook-and-loop fastener strip 1m,3M or Velcro,,1,5.00,5.00,,,Motor retention on vest fabric
+MISC2,28AWG silicone wire assorted colors 10m,,,1,12.00,12.00,,,Motor harness wiring; silicone rated for flex
+MISC3,JST-SH pre-crimped wire pairs 15cm,,,144,0.15,21.60,,,Motor pigtails; saves crimping time
+,,,,,,,,,
+,TOTAL (estimated BOM),,,,,,~1148.00,,Excludes PCB fabrication tooling and shipping
