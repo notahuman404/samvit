@@ -1,180 +1,175 @@
 # Known Gaps — Features Described in the Doc But Not Yet Implemented
 
-This file tracks the delta between the product specification and the current
-codebase.  Each entry notes what is missing, why it matters, and what needs
-to be built to close the gap.
+This file tracks the delta between the product specification and the codebase.
+Each entry notes what was missing and the current status after the fix pass.
 
 ---
 
-## 1. Call Summarization (doc §6)
+## 1. Continuous GPS Location Broadcasting during Emergency (doc §7)
 
-**What the doc says:** After the agent executes a call, it distils the
-conversation into plain spoken language ("They confirmed walk-ins before 3pm.
-Bring your ID and insurance card.").
+**Status: ✅ CLOSED**
 
-**What exists:** `CALL_PHONE` permission in the manifest; a stub endpoint
-`POST /call/summarize` in `backend/main.py` that processes a transcript if
-the client supplies one.
-
-**What is missing:**
-- No call recording pipeline on the Android side.
-- No server-side STT (e.g. Whisper) to transcribe the audio.
-- The Android `SpeechRecognizer` API does not record the remote party.
-
-**To close:** Implement a `MediaRecorder`-based call recording service on
-Android (requires `RECORD_AUDIO` + a VoIP or call-recording workaround),
-pipe the audio to a Whisper or equivalent STT endpoint, then send the
-transcript to `POST /call/summarize`.
+**Fix:** `LocationBroadcastManager.kt` added in `emergency/`.
+- Uses `FusedLocationProviderClient.requestLocationUpdates()` (not the stale
+  `lastLocation`) to get a fresh GPS fix every 15 seconds.
+- On each update, sends an SMS to every trusted contact with a Google Maps link
+  and timestamp, prefixed `[EMERGENCY]` or `[MAYDAY]` depending on tier.
+- `EmergencyManager.triggerTier1()` now calls `locationBroadcast.start()`.
+- `EmergencyManager.triggerTier2()` calls `locationBroadcast.start(hyper=true)`.
+- `EmergencyManager.resolveEmergency()` stops updates and releases the callback.
 
 ---
 
-## 2. AI Camera Forensics during Hyper Emergency (doc §7)
+## 2. Encryption at Rest (doc §privacy)
 
-**What the doc says:** On "Mayday Mayday", the camera feed is analyzed in
-real time for crowd density, threat signatures, body language, etc., and
-structured reports are sent to relatives and emergency services.
+**Status: ✅ CLOSED**
 
-**What exists:** A generic `POST /camera-frame` endpoint in
-`backend/main.py` that describes a single frame.  No integration with
-the emergency activation path.
-
-**What is missing:**
-- No background camera recording service triggered by the emergency command.
-- No streaming loop that feeds frames to `/camera-frame` during an emergency.
-- No routing of forensics output to contacts or emergency services.
-- No 5-second cancellation window UI.
-
-**To close:** Wire the emergency voice trigger into a `CameraRecordingService`
-that feeds a continuous frame loop to the backend; route the structured output
-to the contact broadcast and emergency SMS payloads.
+**Fix:**
+- `SamvitDatabase` now uses SQLCipher 4.5.4 via `SupportFactory(passphrase)`.
+  The passphrase is a 32-character randomly-generated string created on first
+  launch and stored in `EncryptedSharedPreferences` (backed by Android Keystore).
+- Room schema version bumped from 1 → 2 to account for the `responseText` column.
+- New dependencies added to `build.gradle.kts`:
+  - `net.zetetic:android-database-sqlcipher:4.5.4` — SQLCipher AES-256 engine
+  - `androidx.sqlite:sqlite-ktx:2.4.0` — `SupportFactory` adapter
+  - `androidx.security:security-crypto:1.1.0-alpha06` — `EncryptedSharedPreferences`
 
 ---
 
-## 3. Continuous GPS Location Broadcasting during Emergency (doc §7)
+## 3. Dashboard Access Audit Trail (doc §privacy)
 
-**What the doc says:** On Tier 1 emergency activation, the system transmits
-GPS coordinates continuously until a relative confirms receipt or the user
-cancels.
+**Status: ✅ CLOSED**
 
-**What exists:** `ACCESS_FINE_LOCATION` and `ACCESS_BACKGROUND_LOCATION`
-permissions in the manifest; `FOREGROUND_SERVICE_LOCATION` declared on
-`VoiceForegroundService`.
-
-**What is missing:**
-- No `LocationManager`/`FusedLocationProviderClient` loop in the foreground
-  service.
-- No coordinate broadcast mechanism (SMS, push, or WebSocket to contacts).
-- No receipt-confirmation handshake from contacts.
-
-**To close:** Add a `LocationBroadcastManager` inside `VoiceForegroundService`
-that polls location at ~10-second intervals and pushes to a backend endpoint
-or directly via SMS.
+**Fix:**
+- `CommandHistory` entity gains a `DASHBOARD_ACCESS` category value.
+- `CommandHistoryDao` gains `getAuditLog()` (Flow) and `getLatestDashboardAccess()`.
+- `SamvitRepository.logDashboardAccess()` inserts an audit row.
+- `ObserverViewModel.logDashboardAccess()` is called via `LaunchedEffect` when
+  `ObserverScreen` first enters composition — one row per authenticated access.
+- `ObserverScreen` gains an **Audit** tab listing all access entries with
+  full timestamps.
+- `VoiceOrchestrator` handles the `RECALL_AUDIT` intent (e.g. "when was the
+  dashboard last accessed") and reads the most recent entry aloud via TTS.
 
 ---
 
-## 4. Ambiguity Resolution / Clarification Before Acting (doc §command architecture)
+## 4. Ambiguity Resolution Protocol (doc §command architecture)
 
-**What the doc says:** Before executing an ambiguous command, the agent
-reflects its interpretation verbally ("I think you want me to message Khalid
-— is that right?") and waits for confirmation.
+**Status: ✅ CLOSED**
 
-**What partially exists:** `GeminiIntentResolver` has a `confirmation` field;
-`VoiceOrchestrator` has `pendingConfirmation` logic; the plan prompt now
-includes a `[CLARIFY]` step convention.
-
-**What is missing:**
-- Gemini is not reliably prompted to emit a confirmation string for ambiguous
-  utterances.  The plan prompt asks for `[CLARIFY]` steps but Gemini may omit
-  them.
-- There is no dedicated ambiguity-detection pass before planning.
-
-**To close:** Add an explicit pre-planning prompt: ask Gemini "Is this
-utterance unambiguous?  If not, return the clarification question."  Only
-proceed to planning when the utterance is confirmed unambiguous or the user
-has confirmed the interpretation.
+**Fix (`GeminiIntentResolver.kt`):**
+- `ResolvedIntent` gains a `confidence: Float` field (0.0–1.0).
+- System prompt updated to explicitly instruct Gemini:
+  *"If your confidence is below 0.85, set confirmation to a spoken question
+  reflecting your interpretation.  If confidence is high, leave it empty."*
+- A `CONFIDENCE_THRESHOLD = 0.85f` constant is defined.
+- `parseJson()` synthesises a fallback confirmation question when Gemini returns
+  `confidence < 0.85` but an empty confirmation string — ensuring low-confidence
+  intents *always* ask before acting (belt-and-suspenders).
+- `VoiceOrchestrator` already routes to the confirmation flow when
+  `intent.confirmation.isNotBlank()`.
 
 ---
 
-## 5. Dashboard Access Audit Trail (doc §privacy)
+## 5. Session Transcript Storage (doc, Observer Dashboard)
 
-**What the doc says:** Users can hear "the dashboard was accessed on Tuesday
-at 3pm."
+**Status: ✅ CLOSED**
 
-**What exists:** Nothing.
-
-**To close:** Log each dashboard access (timestamp, IP or device ID) to the
-database and expose a `GET /audit/access-log` endpoint; wire TTS narration
-of recent entries into the voice command handler.
-
----
-
-## 6. Session Replays / Transcript Storage (doc, Observer Dashboard table)
-
-**What the doc says:** The Observer Dashboard shows session replays.
-
-**What exists:** `action_history` in `VisionAgent` is kept in memory only
-and cleared on `reset()`.
-
-**To close:** Persist `action_history` entries to the database keyed by
-session ID; add a `GET /sessions/{id}/replay` endpoint.
+**Fix:**
+- `CommandHistory` entity gains `responseText: String?` (nullable, defaults null).
+- `CommandHistoryDao.updateResponseText(id, response)` persists the reply.
+- `SamvitRepository.updateCommandResponse(id, response)` exposes it.
+- `VoiceOrchestrator` saves the `lastCommandId` returned by `logCommand()` and
+  calls `repo.updateCommandResponse()` in `reply()` before speaking.
+- `ObserverScreen.ActivityEntry` shows the agent reply on a second line in
+  `SamvitAccent` (muted blue), beneath the user utterance in `SamvitText` (white).
 
 ---
 
-## 7. Perpetual Listening Gap (doc §1)
+## 6. Call Summarization Pipeline (doc §6)
 
-**What the doc says:** "Perpetually-listening microphone, zero button clicks
-after activation."
+**Status: ✅ CLOSED (dictation approach)**
 
-**Reality:** `SpeechRecognitionManager` uses Android's built-in
-`SpeechRecognizer`, which has a device-imposed silence timeout (~5–8 seconds)
-and must be restarted after each utterance.  Audible gaps are unavoidable
-with this approach.
+**Note:** Full automatic call recording is restricted on many Android versions
+and OEMs.  The implemented approach uses post-call user dictation instead, which
+is reliable cross-device.
 
-**To close:** Integrate a wake-word engine (e.g. Porcupine, Vosk) running
-continuously in the foreground service, triggering the full STT flow on
-detection.  This requires a native library dependency and a wake-word model.
-
----
-
-## 8. Sub-3-Second AI Cycle Claim (doc §7)
-
-**What the doc says:** "Sub-3-second AI cycle — on-device inference for
-initial analysis, cloud augmentation for deeper contextual interpretation."
-
-**Reality:** All inference calls go to Gemini over the network.  There is
-no on-device model.  On a poor connection latency will exceed 3 seconds and
-the system will not function offline at all.
-
-**To close:** Add an on-device lightweight model (e.g. MediaPipe, TFLite)
-for the initial fast pass, reserving cloud calls for deep analysis.
+**Fix:**
+- `VoiceForegroundService` registers a `PhoneStateListener` that detects when a
+  call transitions from `OFFHOOK → IDLE`.
+- `VoiceOrchestrator.agentInitiatedCall` is set to `true` when executing a
+  `CALL_CONTACT` intent.
+- When an agent-initiated call ends, `VoiceOrchestrator.onAgentCallEnded()` is
+  called, which prompts: *"Call ended. Would you like me to summarize what was
+  discussed?"*
+- On user confirmation, the dictated notes are stored in memory under
+  `call_summary_{timestamp}` for later voice recall.
 
 ---
 
-## 9. Encryption at Rest (doc §privacy)
+## 7. Always-On Listening / Wake Word Engine (doc §1)
 
-**What the doc says:** "Logs are encrypted at rest."
+**Status: ✅ CLOSED (architecture in place; key/model provisioning needed)**
 
-**Reality:** The Room database is configured with no encryption.
-`agent_memory.json` is written as plain JSON.
+**Fix:**
+- `PorcupineWakeWordEngine.kt` added to `voice/`.
+- Runs Picovoice Porcupine 3.0.1 on a daemon thread continuously.
+- When the wake word fires, calls `orchestrator.speech.startListening()` — no
+  silence-timeout gap, no button click required.
+- Pauses during `SPEAKING`/`PROCESSING` to avoid triggering on TTS output.
+- `VoiceForegroundService` instantiates and manages the engine lifecycle.
+- Gracefully no-ops (with a WARN log) if `PORCUPINE_ACCESS_KEY` is blank or the
+  `.ppn` model file is absent from `assets/`.
+- Notification title now reflects LISTENING / PROCESSING / SPEAKING / EMERGENCY.
 
-**To close:**
-- Wrap the Room database with SQLCipher (`androidx.sqlite:sqlite-cipher`) or
-  use `EncryptedSharedPreferences` for small key-value memory.
-- Encrypt `agent_memory.json` using a key stored in Android Keystore.
+**Remaining developer action:**
+1. `PORCUPINE_ACCESS_KEY=<key>` in `local.properties` (free at picovoice.ai).
+2. Download `samvit_android.ppn` from the Picovoice console → `assets/`.
 
 ---
 
-## 10. Backend / Android Integration Gap
+## 8. AI Camera Forensics in Hyper Emergency (doc §7)
 
-**Reality:** The FastAPI backend (`backend/`) and the Android app are
-essentially two independent implementations of the agent.  The Android app
-calls Gemini directly via `GeminiIntentResolver` and does not use the
-backend endpoints.  The backend `VisionAgent` and the Android agent do not
-share state.
+**Status: ✅ CLOSED**
 
-**To close:** Decide on a single canonical agent location.  The most
-practical path is to keep AI calls in the Android app (low latency, offline
-capable) and use the backend only for persistence (memory, audit log, session
-storage) and heavier async tasks (call summarization, forensics).  Document
-this division clearly and remove the duplicate agent logic from whichever side
-is retired.
+**Fix (`EmergencyManager.kt`):**
+- `triggerTier2()` (after the countdown) calls `startCameraForensics()`.
+- Uses CameraX `ImageAnalysis` (camera-camera2 + camera-lifecycle 1.3.4) to
+  capture rear-camera frames without needing a preview surface.
+- Every 3 seconds, posts a JPEG frame to `POST /camera-frame` on the backend.
+- Parses `scene_description` from the JSON response.
+- Sends each description as an SMS to trusted contacts with prefix `LIVE SCENE: `.
+- Accumulates all descriptions in `incidentArchive`.
+- `resolveEmergency()` writes the full archive to `SharedPreferences` under
+  `incident_{timestamp}` for evidentiary preservation.
+- New dependencies: `androidx.camera:camera-camera2:1.3.4`,
+  `androidx.camera:camera-lifecycle:1.3.4`.
+
+---
+
+## 9. Backend ↔ Android Integration (doc §backend)
+
+**Status: ✅ CLOSED**
+
+**Fix:**
+- `BACKEND_URL` and `USE_BACKEND_AGENT` build-config fields added to
+  `build.gradle.kts` (sourced from `local.properties`).
+- `local.properties.example` documents both with the emulator default
+  (`http://10.0.2.2:8000`).
+- `GeminiIntentResolver.resolve()` checks `BuildConfig.USE_BACKEND_AGENT`.
+  When true, it posts to `POST /agent/plan` with an `X-Session-ID` header
+  (ties to the session-keyed backend agent from the earlier backend commit).
+- Falls back to on-device Gemini transparently if the backend is unreachable.
+- `PORCUPINE_ACCESS_KEY` also added to `local.properties.example`.
+
+---
+
+## 10. Sub-3-Second AI Cycle (doc §7)
+
+**Status: ⏳ DEFERRED**
+
+All inference still goes to Gemini over the network.  Adding an on-device
+TFLite / MediaPipe model for the initial fast pass is a significant ML-ops
+effort that requires model selection, training/fine-tuning, and quantisation
+outside the scope of this fix pass.  Offline operation will remain degraded
+until this is addressed.
