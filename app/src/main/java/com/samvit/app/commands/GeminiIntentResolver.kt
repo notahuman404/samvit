@@ -162,15 +162,21 @@ Rules:
                 .removePrefix("```json").removePrefix("```")
                 .removeSuffix("```").trim()
 
-            val action = Regex(""""action"\s*:\s*"([^"]+)"""").find(clean)?.groupValues?.get(1) ?: "UNKNOWN"
-            val narration = Regex(""""narration"\s*:\s*"([^"]+)"""").find(clean)?.groupValues?.get(1) ?: ""
-            val confirmation = Regex(""""confirmation"\s*:\s*"([^"]*)"""").find(clean)?.groupValues?.get(1) ?: ""
-            val confidence = Regex(""""confidence"\s*:\s*([\d.]+)""").find(clean)?.groupValues?.get(1)?.toFloatOrNull() ?: 0.9f
+            val obj = org.json.JSONObject(clean)
+            val action = obj.optString("action", "UNKNOWN")
+            val narration = obj.optString("narration", "")
+            val confirmation = obj.optString("confirmation", "")
+            val confidence = obj.optDouble("confidence", 0.9).toFloat()
 
             val params = mutableMapOf<String, String>()
-            Regex(""""(app|contact|message|service|time|query|setting|value|destination)"\s*:\s*"([^"]+)"""")
-                .findAll(clean)
-                .forEach { params[it.groupValues[1]] = it.groupValues[2] }
+            val paramsObj = obj.optJSONObject("params")
+            if (paramsObj != null) {
+                val keys = paramsObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    params[key] = paramsObj.getString(key)
+                }
+            }
 
             // Gap 4 — synthesise a confirmation question for low-confidence intents
             val effectiveConfirmation = if (confidence < CONFIDENCE_THRESHOLD && confirmation.isBlank()) {
@@ -181,6 +187,7 @@ Rules:
 
             ResolvedIntent(action, params, narration, effectiveConfirmation, confidence)
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse Gemini JSON: $json", e)
             unknownIntent()
         }
     }
