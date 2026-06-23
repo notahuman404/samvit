@@ -1,0 +1,4 @@
+-keep class com.samvit.app.** { *; }
+-keepattributes *Annotation*
+-dontwarn okhttp3.**
+-keep class com.google.ai.** { *; }

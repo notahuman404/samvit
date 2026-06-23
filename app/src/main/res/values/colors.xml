@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="samvit_deep">#050A14</color>
+    <color name="samvit_orb">#4A9EFF</color>
+    <color name="samvit_orb_pulse">#1A3A6B</color>
+    <color name="samvit_text">#E8F0FF</color>
+    <color name="samvit_accent">#6EC6FF</color>
+    <color name="samvit_emergency">#FF4444</color>
+    <color name="samvit_mayday">#FF0000</color>
+    <color name="samvit_surface">#0D1A2E</color>
+    <color name="samvit_divider">#1E3050</color>
+</resources>
