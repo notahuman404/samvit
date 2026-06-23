@@ -58,8 +58,8 @@ class AgentAction:
     x: int = 0
     y: int = 0
     confidence: float = 1.0
-    requires_confirmation: bool = False  # True = pause & ask user
-    confirmation_message: str = ""       # What to ask
+    requires_confirmation: bool = False
+    confirmation_message: str = ""
 
 
 @dataclass
@@ -69,7 +69,7 @@ class StepResult:
     screen_description: str = ""
     elements_json: str = "[]"
     error: str = ""
-    screenshot_base64: str = ""  # Optional screenshot for vision
+    screenshot_base64: str = ""
 
 
 @dataclass
@@ -83,7 +83,14 @@ class AgentPlan:
 
 # ─── Memory system ───────────────────────────────────────────────────
 
-MEMORY_FILE = Path(os.environ.get("AGENT_MEMORY_PATH", "agent_memory.json"))
+# Default to a dedicated data directory rather than the CWD so the file
+# doesn't end up in the repo root when the server runs from source.
+_DEFAULT_MEMORY_DIR = Path(os.environ.get("AGENT_DATA_DIR", os.path.join(os.path.expanduser("~"), ".samvit")))
+MEMORY_FILE = Path(os.environ.get("AGENT_MEMORY_PATH", str(_DEFAULT_MEMORY_DIR / "agent_memory.json")))
+
+# How many seconds between automatic flushes to disk.  Mutations mark
+# the store as dirty; a background flush (or explicit save()) writes out.
+_SAVE_DEBOUNCE_SECONDS = 5.0
 
 
 class AgentMemory:
@@ -91,17 +98,24 @@ class AgentMemory:
     Persistent memory that survives across sessions.
     Stores: credentials (encrypted ref only), past goals, app states,
     user preferences, learned patterns.
+
+    Disk writes are batched: mutations set a dirty flag and the store is
+    written at most every _SAVE_DEBOUNCE_SECONDS seconds, rather than on
+    every single mutation (which added synchronous disk I/O latency on
+    slow storage such as Raspberry Pi SD cards).
     """
 
     def __init__(self, path: Path = MEMORY_FILE):
         self._path = path
         self._data: dict[str, Any] = {
-            "credentials": {},     # app_name -> {"username": ..., "has_password": True}
-            "past_goals": [],      # list of {"goal": ..., "outcome": ..., "timestamp": ...}
-            "app_states": {},      # app_name -> {"logged_in": bool, "last_used": timestamp}
-            "user_preferences": {},  # key -> value
-            "learned_patterns": [],  # {"trigger": ..., "action": ..., "confidence": ...}
+            "credentials": {},
+            "past_goals": [],
+            "app_states": {},
+            "user_preferences": {},
+            "learned_patterns": [],
         }
+        self._dirty = False
+        self._last_save: float = 0.0
         self._load()
 
     def _load(self):
@@ -112,10 +126,22 @@ class AgentMemory:
             except (json.JSONDecodeError, OSError) as e:
                 log.warning("Could not load memory: %s", e)
 
+    def _mark_dirty(self):
+        """Mark data as changed and flush if the debounce window has elapsed."""
+        self._dirty = True
+        now = time.monotonic()
+        if now - self._last_save >= _SAVE_DEBOUNCE_SECONDS:
+            self.save()
+
     def save(self):
+        """Write current state to disk unconditionally."""
+        if not self._dirty:
+            return
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(json.dumps(self._data, indent=2))
+            self._dirty = False
+            self._last_save = time.monotonic()
         except OSError as e:
             log.warning("Could not save memory: %s", e)
 
@@ -126,7 +152,7 @@ class AgentMemory:
             "has_password": True,
             "last_login": time.time(),
         }
-        self.save()
+        self._mark_dirty()
 
     def get_credential(self, app: str) -> Optional[dict]:
         return self._data["credentials"].get(app.lower())
@@ -141,7 +167,7 @@ class AgentMemory:
             self._data["app_states"][app_key] = {}
         self._data["app_states"][app_key]["logged_in"] = logged_in
         self._data["app_states"][app_key]["last_used"] = time.time()
-        self.save()
+        self._mark_dirty()
 
     def log_goal(self, goal: str, outcome: str):
         self._data["past_goals"].append({
@@ -149,16 +175,15 @@ class AgentMemory:
             "outcome": outcome,
             "timestamp": time.time(),
         })
-        # Keep only last 50 goals
         self._data["past_goals"] = self._data["past_goals"][-50:]
-        self.save()
+        self._mark_dirty()
 
     def get_recent_goals(self, n: int = 5) -> list[dict]:
         return self._data["past_goals"][-n:]
 
     def set_preference(self, key: str, value: Any):
         self._data["user_preferences"][key] = value
-        self.save()
+        self._mark_dirty()
 
     def get_preference(self, key: str, default=None):
         return self._data["user_preferences"].get(key, default)
@@ -170,7 +195,7 @@ class AgentMemory:
             "confidence": confidence,
         })
         self._data["learned_patterns"] = self._data["learned_patterns"][-100:]
-        self.save()
+        self._mark_dirty()
 
     def find_pattern(self, trigger: str) -> Optional[dict]:
         trigger_lower = trigger.lower()
@@ -205,13 +230,11 @@ RISKY_KEYWORDS = [
 
 
 def is_risky_action(step: str, action_value: str = "") -> bool:
-    """Check if an action should require user confirmation."""
     combined = f"{step} {action_value}".lower()
     return any(kw in combined for kw in RISKY_KEYWORDS)
 
 
 def get_confirmation_message(step: str) -> str:
-    """Generate a user-friendly confirmation message."""
     step_lower = step.lower()
     if "password" in step_lower or "sign in" in step_lower or "log in" in step_lower:
         return "I'm about to enter login credentials. Should I proceed?"
@@ -240,6 +263,9 @@ Rules:
 - Keep steps atomic: one tap/type/scroll per step
 - Maximum 20 steps
 - Mark steps that involve passwords/posting/payments with [CONFIRM] prefix
+
+Before executing any action that is ambiguous, add an explicit clarification
+step of the form: [CLARIFY] I think you want me to <interpretation> — is that right?
 
 Memory context: {memory_context}
 
@@ -325,7 +351,7 @@ class VisionAgent:
         self.max_total_actions = 30
         self._retry_count = 0
         self._pending_confirmation: Optional[AgentAction] = None
-        self._vision_used_count = 0  # Track vision calls to stay efficient
+        self._vision_used_count = 0
 
     def _setup_gemini(self, model, api_key: str):
         try:
@@ -346,9 +372,7 @@ class VisionAgent:
                            step_instruction: str = "") -> dict:
         """
         Use Gemini multimodal to analyze a screenshot when accessibility
-        labels are insufficient. Also performs OCR on visible text.
-
-        Only called when needed (elements are empty/unlabeled).
+        labels are insufficient.  Also performs OCR on visible text.
         """
         if not self._model or not screenshot_b64:
             return {"screen_summary": "", "elements": [], "ocr_text": [], "blocking_overlay": False}
@@ -375,26 +399,23 @@ class VisionAgent:
             return {"screen_summary": "", "elements": [], "ocr_text": [], "blocking_overlay": False}
 
     def _needs_vision(self, elements_json: str) -> bool:
-        """Decide if we should use screenshot vision (expensive) or not."""
         try:
             elements = json.loads(elements_json) if elements_json else []
         except (json.JSONDecodeError, TypeError):
-            return True  # Can't parse → need vision
+            return True
 
         if not elements:
-            return True  # No elements → need vision
+            return True
 
-        # Check if elements have meaningful labels
         labeled = sum(1 for el in elements if el.get("label", "").strip())
         if labeled < len(elements) * 0.3:
-            return True  # Less than 30% labeled → need vision
+            return True
 
         return False
 
     # ── Confirmation handling ────────────────────────────────────
 
     def confirm_action(self, approved: bool) -> AgentAction:
-        """User responds to a confirmation prompt."""
         if not self._pending_confirmation:
             return AgentAction(action=ActionType.WAIT, narration="Nothing to confirm.")
 
@@ -408,7 +429,7 @@ class VisionAgent:
         else:
             self._pending_confirmation = None
             if self.current_plan:
-                self.current_plan.current_step += 1  # Skip this step
+                self.current_plan.current_step += 1
                 self.current_plan.status = "executing"
             return AgentAction(
                 action=ActionType.WAIT,
@@ -418,7 +439,6 @@ class VisionAgent:
     # ── Planning ─────────────────────────────────────────────────
 
     def plan(self, user_goal: str) -> AgentPlan:
-        """Decompose a user goal into ordered steps."""
         log.info("Planning goal: %s", user_goal)
 
         if self._model:
@@ -446,11 +466,9 @@ class VisionAgent:
         return plan
 
     def _fallback_plan(self, goal: str) -> AgentPlan:
-        """Rule-based fallback when LLM is unavailable."""
         goal_lower = goal.lower()
         steps: list[str] = []
 
-        # Check memory for learned patterns
         pattern = self.memory.find_pattern(goal_lower)
         if pattern:
             steps = [pattern["action"]]
@@ -485,7 +503,7 @@ class VisionAgent:
             steps = [
                 "Find the comment box or reply button",
                 "Tap the comment/reply input field",
-                f"Type the comment text",
+                "Type the comment text",
                 "[CONFIRM] Tap Post / Submit / Send button",
                 "Wait for confirmation",
             ]
@@ -520,10 +538,6 @@ class VisionAgent:
 
     def decide_action(self, screen_elements_json: str, screenshot_description: str = "",
                       screenshot_b64: str = "") -> AgentAction:
-        """
-        Given the current screen state and step, decide the next action.
-        Uses screenshot vision when accessibility labels are insufficient.
-        """
         if not self.current_plan or self.current_plan.status not in ("executing",):
             return AgentAction(action=ActionType.DONE, narration="No active plan.")
 
@@ -540,7 +554,6 @@ class VisionAgent:
 
         step_instruction = plan.steps[plan.current_step]
 
-        # Check if this step requires confirmation
         needs_confirm = step_instruction.startswith("[CONFIRM]")
         if needs_confirm:
             step_instruction = step_instruction.replace("[CONFIRM]", "").strip()
@@ -551,7 +564,6 @@ class VisionAgent:
         log.info("Step %d/%d: %s (confirm=%s)",
                  plan.current_step + 1, len(plan.steps), step_instruction, needs_confirm)
 
-        # Decide if we need screenshot vision
         enriched_elements = screen_elements_json
         enriched_description = screenshot_description
 
@@ -563,14 +575,11 @@ class VisionAgent:
                 enriched_elements = json.dumps(vision_result["elements"])
             if vision_result["screen_summary"]:
                 enriched_description = vision_result["screen_summary"]
-            # Append OCR text to description
             if vision_result.get("ocr_text"):
                 enriched_description += " | OCR: " + ", ".join(vision_result["ocr_text"])
 
-        # Get action from LLM or fallback
         action = self._get_action(step_instruction, enriched_elements, enriched_description)
 
-        # Apply confirmation if needed
         if needs_confirm:
             action.requires_confirmation = True
             action.confirmation_message = get_confirmation_message(step_instruction)
@@ -589,7 +598,6 @@ class VisionAgent:
 
     def _get_action(self, step_instruction: str, elements_json: str,
                     screen_description: str) -> AgentAction:
-        """Get action from Gemini or fallback."""
         if self._model:
             try:
                 plan = self.current_plan
@@ -622,11 +630,13 @@ class VisionAgent:
         return self._fallback_action(step_instruction, elements_json)
 
     def _fallback_action(self, step: str, elements_json: str) -> AgentAction:
-        """Heuristic action when LLM is unavailable."""
         step_lower = step.lower()
 
         if step_lower.startswith("open"):
-            app = step.split("Open")[-1].split("the")[-1].strip().rstrip(" app")
+            # Use the lowercased step so the split is case-insensitive.
+            # Original code split on "Open" (capital-O) which produced an
+            # empty string when the step had been normalised to lowercase.
+            app = step_lower.split("open", 1)[-1].split("the", 1)[-1].strip().rstrip(" app").strip()
             return AgentAction(
                 action=ActionType.OPEN_APP,
                 value=app,
@@ -689,7 +699,6 @@ class VisionAgent:
 
         plan = self.current_plan
 
-        # If awaiting confirmation, don't advance
         if plan.status == "awaiting_confirmation":
             return AgentAction(
                 action=ActionType.CONFIRM,
@@ -701,7 +710,6 @@ class VisionAgent:
             self._retry_count = 0
             plan.current_step += 1
 
-            # Update memory based on completed actions
             self._update_memory_from_step(plan)
 
             if plan.current_step >= len(plan.steps):
@@ -720,7 +728,7 @@ class VisionAgent:
                         self._retry_count, self.max_retries_per_step, result.error)
             if self._retry_count >= self.max_retries_per_step:
                 self._retry_count = 0
-                plan.current_step += 1  # Skip stuck step
+                plan.current_step += 1
                 if plan.current_step >= len(plan.steps):
                     plan.status = "failed"
                     self.memory.log_goal(plan.goal, "failed")
@@ -742,15 +750,20 @@ class VisionAgent:
             return
         prev_step = plan.steps[plan.current_step - 1].lower()
         if "sign in" in prev_step or "log in" in prev_step or "login" in prev_step:
-            # Try to figure out which app
+            # Search all steps for an "open <app>" step (case-insensitive).
+            # Original code split on the literal string "Open" which failed
+            # whenever Gemini or the fallback emitted lowercase "open".
             for step in plan.steps:
-                if "open" in step.lower():
-                    app_name = step.split("Open")[-1].strip().rstrip(" app").strip()
-                    self.memory.set_logged_in(app_name, True)
+                step_lower = step.lower()
+                if "open" in step_lower:
+                    # Extract everything after "open", strip common suffixes.
+                    app_name = step_lower.split("open", 1)[-1].strip()
+                    app_name = app_name.removeprefix("the ").removesuffix(" app").strip()
+                    if app_name:
+                        self.memory.set_logged_in(app_name, True)
                     break
 
     def get_status_narration(self) -> str:
-        """Return a human-readable status for TTS."""
         if not self.current_plan:
             return "No task in progress. Tell me what you'd like to do."
         plan = self.current_plan
@@ -769,7 +782,8 @@ class VisionAgent:
             return f"Step {step_num} of {total}: {current}"
 
     def reset(self):
-        """Clear current plan and history."""
+        """Clear current plan and history. Flush any pending memory writes."""
+        self.memory.save()
         self.current_plan = None
         self.action_history.clear()
         self._retry_count = 0
