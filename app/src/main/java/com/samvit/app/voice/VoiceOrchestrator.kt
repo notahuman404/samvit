@@ -301,7 +301,18 @@ class VoiceOrchestrator(private val context: Context) {
                 break
             }
 
-            if (action.narration.isNotBlank()) reply(action.narration)
+            if (action.narration.isNotBlank()) {
+                reply(action.narration)
+                // Wait for TTS to finish before continuing with the next step
+                val ttsJob = CompletableDeferred<Unit>()
+                val originalOnDone = tts.onSpeakingDone
+                tts.onSpeakingDone = {
+                    originalOnDone?.invoke()
+                    ttsJob.complete(Unit)
+                }
+                ttsJob.await()
+                tts.onSpeakingDone = originalOnDone
+            }
 
             if (action.requiresConfirmation) {
                 pendingConfirmation = action.confirmationMessage
@@ -316,7 +327,6 @@ class VoiceOrchestrator(private val context: Context) {
             if (action.planStatus != "running") break
 
             step++
-            delay(500)
             stepResult = StepResult(success = true)
         }
     }
