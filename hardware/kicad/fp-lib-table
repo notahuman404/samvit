@@ -1,0 +1,13 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Package_TO_SOT_SMD")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Package_TO_SOT_SMD.pretty")(options "")(descr "SMD packages for TO and SOT outlines"))
+  (lib (name "Resistor_SMD")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Resistor_SMD.pretty")(options "")(descr "SMD resistors"))
+  (lib (name "Capacitor_SMD")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Capacitor_SMD.pretty")(options "")(descr "SMD capacitors"))
+  (lib (name "Capacitor_THT")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Capacitor_THT.pretty")(options "")(descr "Through-hole capacitors"))
+  (lib (name "Diode_SMD")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Diode_SMD.pretty")(options "")(descr "SMD diodes"))
+  (lib (name "Package_SO")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Package_SO.pretty")(options "")(descr "SMD small-outline packages (TSSOP, SOIC, etc.)"))
+  (lib (name "Connector_JST")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Connector_JST.pretty")(options "")(descr "JST connector footprints"))
+  (lib (name "Connector_PinHeader_2.54mm")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/Connector_PinHeader_2.54mm.pretty")(options "")(descr "2.54mm pitch pin headers"))
+  (lib (name "TestPoint")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/TestPoint.pretty")(options "")(descr "Test points"))
+  (lib (name "MountingHole")(type "KiCad")(uri "${KICAD7_FOOTPRINT_DIR}/MountingHole.pretty")(options "")(descr "Mounting holes"))
+)

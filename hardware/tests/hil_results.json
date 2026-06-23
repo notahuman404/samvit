@@ -1,0 +1,327 @@
+{
+  "metadata": {
+    "timestamp": "2026-06-21T02:07:03Z",
+    "seed": 2024,
+    "platform": "Raspberry Pi 4B (simulated)",
+    "i2c_bus": "/dev/i2c-1 @ 400kHz",
+    "motor_drivers": "9\u00d7 NXP PCA9685",
+    "cameras": "2\u00d7 Intel RealSense D435i",
+    "motor_grid": "12\u00d712 (144 ERM motors)",
+    "references": [
+      "NXP PCA9685 Datasheet Rev.4 (2015)",
+      "Intel RealSense D435i Datasheet (2019)",
+      "Intel RealSense White Paper: Best Known Methods for D400 Depth",
+      "Broadcom BCM2711 Peripherals Documentation"
+    ]
+  },
+  "summary": {
+    "total_tests": 22,
+    "passed": 22,
+    "failed": 0,
+    "total_time_ms": 753.79
+  },
+  "tests": [
+    {
+      "name": "PCA9685 Init Sequence (Datasheet \u00a77.4)",
+      "category": "I2C Protocol Compliance",
+      "passed": true,
+      "duration_ms": 5.201,
+      "details": "PCA9685 init sequence validated against datasheet \u00a77.4. ALLCALL preserved on all boards.",
+      "metrics": {
+        "boards": 9,
+        "writes_per_board": 3,
+        "total_transactions": 27,
+        "oscillator_wait_per_board_us": 500
+      }
+    },
+    {
+      "name": "ALLCALL Emergency Stop",
+      "category": "I2C Protocol Compliance",
+      "passed": true,
+      "duration_ms": 0.037,
+      "details": "Emergency stop: 1 ALLCALL transaction zeroes all 144 motors. Bus time: 145.1\u03bcs",
+      "metrics": {
+        "transactions": 1,
+        "bus_time_us": 145.1,
+        "latency_from_trigger_us": 145.1
+      }
+    },
+    {
+      "name": "Raw I2C 65-byte Writes (Bug #11 Fix)",
+      "category": "I2C Protocol Compliance",
+      "passed": true,
+      "duration_ms": 0.098,
+      "details": "Raw I2C writes: 65 bytes/board \u00d7 9 boards = 585 bytes/frame. SMBus cap bypassed.",
+      "metrics": {
+        "bytes_per_board": 65,
+        "total_bytes_per_frame": 585,
+        "bus_time_per_frame_us": 13457.7,
+        "bus_utilization_pct": 26.92
+      }
+    },
+    {
+      "name": "I2C Timing Budget Validation",
+      "category": "I2C Protocol Compliance",
+      "passed": true,
+      "duration_ms": 0.15,
+      "details": "I2C bus utilization: 26.92% of 50ms budget. Theoretical min: 13770\u03bcs",
+      "metrics": {
+        "bus_utilization_pct": 26.92,
+        "total_bus_time_us": 13457.7,
+        "frame_budget_us": 50000.0,
+        "theoretical_min_us": 13770.0,
+        "headroom_us": 36542.3
+      }
+    },
+    {
+      "name": "PCA9685 Register Payload Format",
+      "category": "I2C Protocol Compliance",
+      "passed": true,
+      "duration_ms": 0.029,
+      "details": "PCA9685 register payload format validated for OFF/ON/mid states.",
+      "metrics": {
+        "payload_size": 65,
+        "channels": 16,
+        "bytes_per_channel": 4
+      }
+    },
+    {
+      "name": "D435i Noise Model vs Intel Specs",
+      "category": "Depth Sensor Validation",
+      "passed": true,
+      "duration_ms": 60.912,
+      "details": "D435i noise model validated against Intel published specs. Quadratic noise growth confirmed.",
+      "metrics": {
+        "500mm": {
+          "\u03c3_measured": 0.52,
+          "\u03c3_expected": 0.5,
+          "mean_bias_mm": 0.0,
+          "invalid_rate": 0.0152
+        },
+        "1000mm": {
+          "\u03c3_measured": 2.02,
+          "\u03c3_expected": 2.0,
+          "mean_bias_mm": -0.04,
+          "invalid_rate": 0.013
+        },
+        "1500mm": {
+          "\u03c3_measured": 4.42,
+          "\u03c3_expected": 4.5,
+          "mean_bias_mm": 0.01,
+          "invalid_rate": 0.016
+        },
+        "2000mm": {
+          "\u03c3_measured": 7.83,
+          "\u03c3_expected": 8.0,
+          "mean_bias_mm": -0.17,
+          "invalid_rate": 0.0404
+        },
+        "3000mm": {
+          "\u03c3_measured": 18.33,
+          "\u03c3_expected": 18.0,
+          "mean_bias_mm": 0.11,
+          "invalid_rate": 0.0478
+        },
+        "4000mm": {
+          "\u03c3_measured": 32.1,
+          "\u03c3_expected": 32.0,
+          "mean_bias_mm": 0.42,
+          "invalid_rate": 0.1278
+        }
+      }
+    },
+    {
+      "name": "Invalid Depth \u2192 Zero Intensity (Bug #13)",
+      "category": "Depth Sensor Validation",
+      "passed": true,
+      "duration_ms": 48.169,
+      "details": "Zero violations in 1000 frames \u00d7 50 invalid pixels each. Bug #13 invariant holds.",
+      "metrics": {
+        "frames_tested": 1000,
+        "invalid_pixels_per_frame": 50,
+        "total_checked": 50000,
+        "violations": 0
+      }
+    },
+    {
+      "name": "Depth-to-Intensity Linearity",
+      "category": "Depth Sensor Validation",
+      "passed": true,
+      "duration_ms": 0.023,
+      "details": "Intensity mapping linearity verified at all boundary conditions.",
+      "metrics": {
+        "test_points": 6
+      }
+    },
+    {
+      "name": "Fusion Overlap Min-Distance Logic",
+      "category": "Dual Camera Fusion",
+      "passed": true,
+      "duration_ms": 0.024,
+      "details": "Fusion overlap logic verified: min-distance with correct invalid handling.",
+      "metrics": {
+        "overlap_rows": "[4, 8)"
+      }
+    },
+    {
+      "name": "Fusion Region Boundaries",
+      "category": "Dual Camera Fusion",
+      "passed": true,
+      "duration_ms": 0.027,
+      "details": "Region boundaries correct: rows 0-3 upper, 4-7 overlap, 8-11 lower.",
+      "metrics": {}
+    },
+    {
+      "name": "Fusion with Realistic Noise (100 frames)",
+      "category": "Dual Camera Fusion",
+      "passed": true,
+      "duration_ms": 27.388,
+      "details": "Fused mean=1497.6mm (true=1500), \u03c3=3.9mm (single camera \u03c3\u22484.5mm)",
+      "metrics": {
+        "fused_mean_mm": 1497.6,
+        "fused_std_mm": 3.9,
+        "single_cam_expected_std_mm": 4.5,
+        "frames_sampled": 100
+      }
+    },
+    {
+      "name": "144-Motor Bijective Channel Mapping",
+      "category": "Motor Grid Mapping",
+      "passed": true,
+      "duration_ms": 0.034,
+      "details": "Bijective mapping verified: 144 motors \u2192 9\u00d716.",
+      "metrics": {
+        "total_motors": 144,
+        "boards": 9,
+        "channels_per_board": 16
+      }
+    },
+    {
+      "name": "E2E Single Frame Pipeline",
+      "category": "End-to-End Pipeline",
+      "passed": true,
+      "duration_ms": 5.78,
+      "details": "E2E pipeline: 0.378ms (budget: 50.0ms). 93/144 motors active.",
+      "metrics": {
+        "pipeline_time_ms": 0.378,
+        "budget_ms": 50.0,
+        "headroom_pct": 99.2,
+        "active_motors": 93,
+        "max_intensity": 3056,
+        "i2c_bytes": 585
+      }
+    },
+    {
+      "name": "Sustained Operation (1000 frames)",
+      "category": "End-to-End Pipeline",
+      "passed": true,
+      "duration_ms": 544.502,
+      "details": "1000 frames: avg=0.378ms, max=4.942ms, p99=0.655ms, \u03c3=0.171ms. 0 errors.",
+      "metrics": {
+        "frames": 1000,
+        "avg_ms": 0.378,
+        "max_ms": 4.942,
+        "p99_ms": 0.655,
+        "jitter_std_ms": 0.171,
+        "errors": 0,
+        "total_i2c_MB": 0.558,
+        "budget_utilization": "0.76%"
+      }
+    },
+    {
+      "name": "Board Failure Isolation",
+      "category": "Hardware Fault Injection",
+      "passed": true,
+      "duration_ms": 5.185,
+      "details": "Board failure isolation: 8/9 boards updated, failed board 4 didn't cascade.",
+      "metrics": {
+        "operational_boards": 8,
+        "failed_boards": 1,
+        "motors_affected": 16,
+        "motors_still_active": 128
+      }
+    },
+    {
+      "name": "Brown-out Detection (Vcc < 2.7V)",
+      "category": "Hardware Fault Injection",
+      "passed": true,
+      "duration_ms": 5.164,
+      "details": "Brown-out correctly detected at Vcc=2.5V (threshold=2.7V).",
+      "metrics": {
+        "brownout_voltage": 2.5,
+        "threshold_voltage": 2.7
+      }
+    },
+    {
+      "name": "Stuck Bus (SCL Low) Detection",
+      "category": "Hardware Fault Injection",
+      "passed": true,
+      "duration_ms": 0.012,
+      "details": "Stuck bus (SCL held low) correctly detected and reported.",
+      "metrics": {}
+    },
+    {
+      "name": "NACK Retry Resilience (5% error rate)",
+      "category": "Hardware Fault Injection",
+      "passed": true,
+      "duration_ms": 16.271,
+      "details": "NACK resilience: 100.0% frame success rate with 5% bus error + 3 retries.",
+      "metrics": {
+        "nack_rate": "5%",
+        "retries": 3,
+        "frames": 200,
+        "success_rate_pct": 100.0,
+        "total_nacks": 3
+      }
+    },
+    {
+      "name": "Thermal Performance (70\u00b0C)",
+      "category": "Hardware Fault Injection",
+      "passed": true,
+      "duration_ms": 5.277,
+      "details": "At 70\u00b0C: I2C bus time = 13524.2\u03bcs (still well within budget).",
+      "metrics": {
+        "temperature_c": 70,
+        "bus_time_us": 13524.2,
+        "avg_transaction_us": 1502.7
+      }
+    },
+    {
+      "name": "All Motors Max Power (Current Budget)",
+      "category": "Edge Cases & Regression",
+      "passed": true,
+      "duration_ms": 0.069,
+      "details": "All 144 motors at 100% duty. Peak draw: 10.8A @ 3.0V = 32.4W",
+      "metrics": {
+        "motors": 144,
+        "total_current_A": 10.8,
+        "total_power_W": 32.4,
+        "supply_voltage_V": 3.0
+      }
+    },
+    {
+      "name": "Single Motor Precision Addressing",
+      "category": "Edge Cases & Regression",
+      "passed": true,
+      "duration_ms": 0.056,
+      "details": "Single motor precision: motor 77 active, all 143 neighbors silent.",
+      "metrics": {
+        "target_motor": 77,
+        "board": 4,
+        "channel": 13
+      }
+    },
+    {
+      "name": "Rapid On/Off Cycling (500 cycles)",
+      "category": "Edge Cases & Regression",
+      "passed": true,
+      "duration_ms": 29.388,
+      "details": "500 on/off cycles completed. 0 bus errors.",
+      "metrics": {
+        "cycles": 500,
+        "errors": 0,
+        "total_register_writes": 4500
+      }
+    }
+  ]
+}
