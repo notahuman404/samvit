@@ -44,6 +44,12 @@ abstract class SamvitDatabase : RoomDatabase() {
             INSTANCE ?: buildDatabase(context.applicationContext).also { INSTANCE = it }
         }
 
+        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE command_history ADD COLUMN responseText TEXT")
+            }
+        }
+
         private fun buildDatabase(context: Context): SamvitDatabase {
             val passphrase = getOrCreatePassphrase(context)
             val factory: SupportSQLiteOpenHelper.Factory =
@@ -55,7 +61,7 @@ abstract class SamvitDatabase : RoomDatabase() {
                 "samvit.db"
             )
                 .openHelperFactory(factory)
-                .fallbackToDestructiveMigration()
+                .addMigrations(MIGRATION_1_2)
                 .build()
         }
 
