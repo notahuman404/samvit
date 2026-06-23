@@ -39,20 +39,32 @@ class VoiceForegroundService : Service() {
     private var telephonyManager: TelephonyManager? = null
 
     // Gap 6 — monitors phone call state to detect when an agent-initiated call ends
+    private var wasOffhook = false
+
     @Suppress("DEPRECATION")
     private val phoneStateListener = object : PhoneStateListener() {
-        private var wasOffhook = false
-
         @Deprecated("Deprecated in Java")
         override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-            when (state) {
-                TelephonyManager.CALL_STATE_OFFHOOK -> wasOffhook = true
-                TelephonyManager.CALL_STATE_IDLE -> {
-                    if (wasOffhook && orchestrator.agentInitiatedCall) {
-                        orchestrator.onAgentCallEnded()
-                    }
-                    wasOffhook = false
+            handleCallStateChanged(state)
+        }
+    }
+
+    private val telephonyCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        object : android.telephony.TelephonyCallback(), android.telephony.TelephonyCallback.CallStateListener {
+            override fun onCallStateChanged(state: Int) {
+                handleCallStateChanged(state)
+            }
+        }
+    } else null
+
+    private fun handleCallStateChanged(state: Int) {
+        when (state) {
+            TelephonyManager.CALL_STATE_OFFHOOK -> wasOffhook = true
+            TelephonyManager.CALL_STATE_IDLE -> {
+                if (wasOffhook && orchestrator.agentInitiatedCall) {
+                    orchestrator.onAgentCallEnded()
                 }
+                wasOffhook = false
             }
         }
     }
@@ -80,8 +92,12 @@ class VoiceForegroundService : Service() {
 
         // Gap 6 — register call-state listener
         telephonyManager = getSystemService(TELEPHONY_SERVICE) as? TelephonyManager
-        @Suppress("DEPRECATION")
-        telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            telephonyCallback?.let { telephonyManager?.registerTelephonyCallback(mainExecutor, it) }
+        } else {
+            @Suppress("DEPRECATION")
+            telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+        }
 
         // Mirror orchestrator state into the notification via a lightweight polling thread.
         Thread {
@@ -103,8 +119,12 @@ class VoiceForegroundService : Service() {
 
     override fun onDestroy() {
         wakeWordEngine?.stop()
-        @Suppress("DEPRECATION")
-        telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            telephonyCallback?.let { telephonyManager?.unregisterTelephonyCallback(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
+        }
         orchestrator.stop()
         super.onDestroy()
     }
