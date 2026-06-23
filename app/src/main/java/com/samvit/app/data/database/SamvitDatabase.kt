@@ -4,8 +4,6 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKeys
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import com.samvit.app.data.dao.*
 import com.samvit.app.data.entities.*
@@ -15,12 +13,17 @@ import net.sqlcipher.database.SupportFactory
 /**
  * Room database with SQLCipher AES-256 encryption at rest (gap 2).
  *
- * The passphrase is a randomly-generated 32-character string that is created
- * on the first launch and stored inside EncryptedSharedPreferences (backed by
- * Android Keystore).  It never leaves the device and is never visible in logs.
+ * The passphrase is a randomly-generated 32-character string created on first
+ * launch and stored inside the shared [SecurePrefs] EncryptedSharedPreferences
+ * (backed by Android Keystore).  It never leaves the device.
+ *
+ * Using [SecurePrefs] here rather than opening a second EncryptedSharedPreferences
+ * instance ensures that EmergencyManager's incident archive and the DB passphrase
+ * are both protected by the same Keystore master key — closing the regression
+ * introduced in round 1 (fix 1).
  *
  * Schema version 2: added responseText column to command_history (gap 5).
- * fallbackToDestructiveMigration() handles dev-time schema changes; production
+ * fallbackToDestructiveMigration() is used for dev-time schema changes; production
  * builds should use a proper Migration instead.
  */
 @Database(
@@ -51,25 +54,18 @@ abstract class SamvitDatabase : RoomDatabase() {
                 SamvitDatabase::class.java,
                 "samvit.db"
             )
-                .openHelperFactory(factory)   // enables AES-256 encryption via SQLCipher
+                .openHelperFactory(factory)
                 .fallbackToDestructiveMigration()
                 .build()
         }
 
         /**
-         * Return the stored passphrase, generating and persisting a new one if
-         * this is the first launch.  EncryptedSharedPreferences wraps the value
-         * with AES-256-GCM, keyed by the Android Keystore master key.
+         * Return the stored passphrase, generating and persisting a new one if this
+         * is the first launch.  Delegates to [SecurePrefs] so the same Keystore
+         * master key guards both the passphrase and the incident archive.
          */
         private fun getOrCreatePassphrase(context: Context): String {
-            val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
-            val prefs = EncryptedSharedPreferences.create(
-                "samvit_secure_prefs",
-                masterKeyAlias,
-                context,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            val prefs = SecurePrefs.get(context)
             val key = "db_passphrase"
             return prefs.getString(key, null) ?: run {
                 val generated = generatePassphrase()
@@ -78,7 +74,6 @@ abstract class SamvitDatabase : RoomDatabase() {
             }
         }
 
-        /** 32 random printable ASCII characters — sufficient entropy for AES-256. */
         private fun generatePassphrase(): String {
             val chars = ('a'..'z') + ('A'..'Z') + ('0'..'9')
             return (1..32).map { chars.random() }.joinToString("")

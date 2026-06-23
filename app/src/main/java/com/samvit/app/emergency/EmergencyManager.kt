@@ -15,11 +15,11 @@ import androidx.lifecycle.LifecycleOwner
 import com.google.android.gms.location.LocationServices
 import com.samvit.app.BuildConfig
 import com.samvit.app.data.database.SamvitDatabase
+import com.samvit.app.data.database.SecurePrefs
 import com.samvit.app.voice.TTSManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.tasks.await
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -56,7 +56,6 @@ class EmergencyManager(
     // ── Tier 1 — Standard Emergency ───────────────────────────────────────────
     fun triggerTier1() {
         tts.speak("Emergency activated. Calling your contacts and sending your location.")
-        // Gap 1 — start repeating location SMS every 15 seconds
         locationBroadcast.start(hyper = false)
         scope.launch {
             val location = getLocation()
@@ -94,23 +93,29 @@ class EmergencyManager(
 
     /**
      * Stop all ongoing emergency broadcasting.  Called when the user PIN-cancels
-     * or a trusted contact confirms receipt (gap 1).
+     * or a trusted contact confirms receipt.
+     *
+     * Fix 1 (regression) — the incident archive is now written to the shared
+     * [SecurePrefs] EncryptedSharedPreferences instead of plain SharedPreferences,
+     * so it is protected by the same AES-256-GCM Keystore key as the Room DB
+     * passphrase.  No second Keystore key is created.
      */
     fun resolveEmergency() {
         locationBroadcast.stop()
         cameraForensicsJob?.cancel()
-        // Gap 8 — persist the incident archive on resolution
         if (incidentArchive.isNotEmpty()) {
             val timestamp = System.currentTimeMillis()
-            val prefs = context.getSharedPreferences("samvit_incidents", Context.MODE_PRIVATE)
-            prefs.edit().putString("incident_$timestamp", incidentArchive.joinToString("\n")).apply()
+            // Fix 1: use the shared EncryptedSharedPreferences — never plain getSharedPreferences()
+            SecurePrefs.get(context)
+                .edit()
+                .putString("incident_$timestamp", incidentArchive.joinToString("\n"))
+                .apply()
         }
         incidentArchive.clear()
     }
 
     private fun escalateToTier2() {
         tts.speak("Hyper Emergency activated. Contacting emergency services.")
-        // Gap 1 — hyper-tier broadcasts every 15 s with MAYDAY prefix
         locationBroadcast.start(hyper = true)
         scope.launch {
             val location = getLocation()
@@ -125,21 +130,10 @@ class EmergencyManager(
             delay(500)
             makeCall("911")
         }
-        // Gap 8 — start camera forensics for Tier 2
         startCameraForensics()
     }
 
     // ── Gap 8 — AI Camera Forensics ───────────────────────────────────────────
-    /**
-     * Opens the rear camera using CameraX and sends a frame to the backend
-     * /camera-frame endpoint every 3 seconds.  Each scene description is:
-     *  - sent as an SMS to trusted contacts with prefix "LIVE SCENE: "
-     *  - added to incidentArchive for evidentiary preservation on resolution
-     *
-     * Note: requires a lifecycle owner to bind CameraX.  We get the ProcessCameraProvider
-     * from context; in production the calling Activity/Service should be the lifecycle
-     * owner — here we fall back to a non-lifecycle approach with ImageAnalysis only.
-     */
     private fun startCameraForensics() {
         if (BuildConfig.BACKEND_URL.isBlank()) return
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
@@ -167,8 +161,6 @@ class EmergencyManager(
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
             try {
                 cameraProvider.unbindAll()
-                // Bind without lifecycle — suitable for foreground-service context.
-                // The imageAnalysis use case does not need a preview surface.
                 cameraProvider.bindToLifecycle(
                     context as LifecycleOwner,
                     selector,
@@ -187,16 +179,20 @@ class EmergencyManager(
         return bytes
     }
 
+    /**
+     * POST the frame to the backend as base64 JSON — matching the
+     * [CameraFrameRequest] schema in backend/main.py.
+     *
+     * (Previous implementation used multipart form upload and read
+     * "scene_description" (snake_case) from the response; both were wrong.
+     * The backend accepts {"frameBase64": "..."} and returns {"sceneDescription": "..."}.)
+     */
     private suspend fun sendFrameToBackend(frameBytes: ByteArray) {
         if (frameBytes.isEmpty()) return
         try {
-            val body = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart(
-                    "frame", "frame.jpg",
-                    frameBytes.toRequestBody("image/jpeg".toMediaType())
-                )
-                .build()
+            val base64Frame = android.util.Base64.encodeToString(frameBytes, android.util.Base64.NO_WRAP)
+            val body = JSONObject().put("frameBase64", base64Frame).toString()
+                .toRequestBody("application/json".toMediaType())
             val request = Request.Builder()
                 .url("${BuildConfig.BACKEND_URL}/camera-frame")
                 .post(body)
@@ -205,11 +201,10 @@ class EmergencyManager(
             val response = httpClient.newCall(request).execute()
             if (response.isSuccessful) {
                 val json = JSONObject(response.body?.string() ?: return)
-                val description = json.optString("scene_description", "").ifBlank { return }
-                // Store for the incident archive
+                // Backend field is camelCase "sceneDescription" per Pydantic model name
+                val description = json.optString("sceneDescription", "").ifBlank { return }
                 val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                 incidentArchive.add("[$timestamp] $description")
-                // SMS all trusted contacts with the live scene description
                 sendSceneSms(description)
             }
         } catch (e: Exception) {
