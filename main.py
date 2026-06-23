@@ -87,22 +87,38 @@ DEMO_REQUIREMENTS = {
 # CLI
 # ──────────────────────────────────────────────────────────────────────────────
 def resolve_api_keys() -> list[str]:
-    keys = []
-    itr = 0
-    base = "GEMINI_API_KEY"
+    """
+    Load Gemini API keys from environment variables.
+
+    Expected names (as documented in the module docstring):
+        GEMINI_API_KEY_1  — first key  (required)
+        GEMINI_API_KEY_2  — second key (optional)
+        GEMINI_API_KEY_N  — additional keys
+
+    The plain GEMINI_API_KEY variable (no number suffix) is also accepted as a
+    convenience alias for GEMINI_API_KEY_1 so that single-key setups work
+    without renaming their existing env var.  It is checked last so that
+    numbered keys take precedence and duplicates are avoided.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    # Collect numbered keys first (GEMINI_API_KEY_1, _2, …) to match docs.
+    idx = 1
     while True:
-        if itr == 0 :
-            key = os.getenv(base)
-            if key:
-                keys.append(key)
-            itr+=1
-            continue
-        
-        key = os.getenv(f"{base}_{itr}")
-        if key:
+        key = os.getenv(f"GEMINI_API_KEY_{idx}")
+        if not key:
+            break
+        if key not in seen:
             keys.append(key)
-            itr+=1
-        else: break
+            seen.add(key)
+        idx += 1
+
+    # Accept plain GEMINI_API_KEY as a fallback alias.
+    plain = os.getenv("GEMINI_API_KEY")
+    if plain and plain not in seen:
+        keys.append(plain)
+
     return keys
 
 
@@ -178,8 +194,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-
-        
 async def _main() -> None:
     args = parse_args()
 
@@ -211,7 +225,6 @@ async def _main() -> None:
     elif args.requirements:
         requirements_input = args.requirements
     elif args.resume_from:
-        # Requirements come from the checkpoint when resuming.
         requirements_input = None
         log.info("Resuming from checkpoint %s — requirements taken from state.", args.resume_from)
     else:
