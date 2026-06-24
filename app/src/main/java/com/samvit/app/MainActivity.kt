@@ -2,6 +2,7 @@ package com.samvit.app
 
 import android.Manifest
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -41,9 +42,27 @@ class MainActivity : ComponentActivity() {
     private val mainViewModel: MainViewModel by viewModels()
     private val observerViewModel: ObserverViewModel by viewModels()
 
-    private val permissionLauncher = registerForActivityResult(
+    /**
+     * Step 1 — requests all foreground permissions.
+     * On success, if ACCESS_FINE_LOCATION was granted we immediately request
+     * ACCESS_BACKGROUND_LOCATION via a separate launcher (Android 10+ requirement).
+     */
+    private val foregroundPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { /* permissions handled reactively */ }
+    ) { results ->
+        if (results[Manifest.permission.ACCESS_FINE_LOCATION] == true) {
+            requestBackgroundLocationPermission()
+        }
+    }
+
+    /**
+     * Step 2 — requests ACCESS_BACKGROUND_LOCATION on its own.
+     * Android 11+ (API 30+) forbids bundling it with other permissions in a single
+     * launch() call; it must be requested separately after foreground location is granted.
+     */
+    private val backgroundPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* result handled reactively by LocationBroadcastManager */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,16 +117,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestEssentialPermissions() {
-        val permissions = arrayOf(
-            Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.ACCESS_FINE_LOCATION,
-            Manifest.permission.CALL_PHONE,
-            Manifest.permission.SEND_SMS,
-            Manifest.permission.READ_CONTACTS,
-            Manifest.permission.CAMERA,
-            Manifest.permission.POST_NOTIFICATIONS
+        foregroundPermLauncher.launch(
+            arrayOf(
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.CALL_PHONE,
+                Manifest.permission.SEND_SMS,
+                Manifest.permission.READ_CONTACTS,
+                Manifest.permission.CAMERA,
+                Manifest.permission.POST_NOTIFICATIONS
+            )
         )
-        permissionLauncher.launch(permissions)
+    }
+
+    /**
+     * ACCESS_BACKGROUND_LOCATION must be requested in a separate call after foreground
+     * location is already granted.  On Android 11+ the system rejects any multi-permission
+     * dialog that includes this permission alongside others.
+     */
+    private fun requestBackgroundLocationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            backgroundPermLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        }
     }
 
     private fun startVoiceService() {
@@ -138,7 +169,6 @@ class MainActivity : ComponentActivity() {
         ) == BiometricManager.BIOMETRIC_SUCCESS
 
         if (!canUseBiometric) {
-            // No biometric enrolled — open directly (for dev/testing)
             onSuccess()
             return
         }
