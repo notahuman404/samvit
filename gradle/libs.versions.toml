@@ -11,7 +11,7 @@ workVersion = "2.9.1"
 datastoreVersion = "1.1.1"
 gmsLocation = "21.3.0"
 generativeai = "0.9.0"
-biometric = "1.2.0-alpha05"
+biometric = "1.1.0"
 coroutines = "1.8.1"
 navigationCompose = "2.7.7"
 accompanistPermissions = "0.34.0"
@@ -19,7 +19,7 @@ accompanistPermissions = "0.34.0"
 # provides EncryptedSharedPreferences for the passphrase key.
 sqlcipher = "4.5.4"
 sqliteKtx = "2.4.0"
-securityCrypto = "1.1.0-alpha06"
+securityCrypto = "1.0.0"
 # Gap 7 — always-on wake-word engine (Picovoice Porcupine, free tier).
 # Requires PORCUPINE_ACCESS_KEY in local.properties and a .ppn model in assets/.
 porcupine = "3.0.1"
