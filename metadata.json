@@ -1,5 +1,5 @@
 {
-  "name": "VisionPilot",
+  "name": "Samvit",
   "description": "AI Assistive Agent for Visually Impaired Users. Features modern vocal navigation, clean M3 designs, real-time screen understanding previews, and speech response stub systems.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
