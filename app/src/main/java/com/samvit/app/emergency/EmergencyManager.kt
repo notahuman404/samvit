@@ -12,6 +12,7 @@ import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.google.android.gms.location.LocationServices
 import com.samvit.app.BuildConfig
 import com.samvit.app.data.database.SamvitDatabase
@@ -161,7 +162,7 @@ class EmergencyManager(
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
             try {
                 cameraProvider.unbindAll()
-                val lifecycleOwner = context as? LifecycleOwner ?: return@addListener
+                val lifecycleOwner = ProcessLifecycleOwner.get()
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     selector,
@@ -218,10 +219,15 @@ class EmergencyManager(
             != PackageManager.PERMISSION_GRANTED) return
         val contacts = db.trustedContactDao().getAllOnce()
         val message = "LIVE SCENE: $description"
+        val smsManager = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            context.getSystemService(SmsManager::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            SmsManager.getDefault()
+        }
         contacts.forEach { contact ->
             try {
-                @Suppress("DEPRECATION")
-                SmsManager.getDefault().sendTextMessage(contact.phone, null, message, null, null)
+                smsManager.sendTextMessage(contact.phone, null, message, null, null)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -239,9 +245,14 @@ class EmergencyManager(
         else "Location unavailable"
 
         val message = "[$tier] Samvit alert from your trusted contact. $locationStr"
-        try {
+        val smsManager = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            context.getSystemService(SmsManager::class.java)
+        } else {
             @Suppress("DEPRECATION")
-            SmsManager.getDefault().sendTextMessage(phone, null, message, null, null)
+            SmsManager.getDefault()
+        }
+        try {
+            smsManager.sendTextMessage(phone, null, message, null, null)
         } catch (e: Exception) {
             e.printStackTrace()
         }

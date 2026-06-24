@@ -86,11 +86,16 @@ class LocationBroadcastManager(private val context: Context) {
         val mapsUrl = "https://maps.google.com/?q=$lat,$lng"
         val time = fmt.format(Date())
         val message = "[$tier] Samvit live location update at $time: $mapsUrl"
+        val smsManager = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            context.getSystemService(SmsManager::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            SmsManager.getDefault()
+        }
 
         contacts.forEach { contact ->
             try {
-                @Suppress("DEPRECATION")
-                SmsManager.getDefault().sendTextMessage(contact.phone, null, message, null, null)
+                smsManager.sendTextMessage(contact.phone, null, message, null, null)
             } catch (e: Exception) {
                 e.printStackTrace()
             }

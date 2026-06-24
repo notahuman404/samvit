@@ -10,3 +10,8 @@
 local.properties
 *.keystore
 !debug.keystore
+
+# Junk files
+*.log
+*.jsonl
+repo.zip

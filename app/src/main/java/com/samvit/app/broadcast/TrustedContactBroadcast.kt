@@ -49,11 +49,15 @@ class TrustedContactBroadcast(
             != PackageManager.PERMISSION_GRANTED) return
 
         val message = "[Samvit] I'm heading to $destination. I'll keep you updated."
-
-        try {
+        val smsManager = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            context.getSystemService(android.telephony.SmsManager::class.java)
+        } else {
             @Suppress("DEPRECATION")
             android.telephony.SmsManager.getDefault()
-                .sendTextMessage(phone, null, message, null, null)
+        }
+
+        try {
+            smsManager.sendTextMessage(phone, null, message, null, null)
         } catch (e: Exception) {
             e.printStackTrace()
         }
