@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -33,13 +34,31 @@ class ReminderWorker(
         return Result.success()
     }
 
+    /**
+     * Speaks [text] through a single TTS instance that shuts itself down once
+     * the utterance completes (or fails).
+     *
+     * Previous implementation created two nested TextToSpeech objects — the outer
+     * one was never shut down and the inner one called speak() before its own
+     * onInit had fired, producing a resource leak and a race condition where the
+     * reminder might never actually be spoken.
+     */
     private fun speakReminder(text: String) {
-        TextToSpeech(context) { status ->
+        var tts: TextToSpeech? = null
+        tts = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                val tts = TextToSpeech(context) {}
-                tts.language = Locale.UK
-                tts.setSpeechRate(0.92f)
-                tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, UUID.randomUUID().toString())
+                tts?.language = Locale.UK
+                tts?.setSpeechRate(0.92f)
+                val utteranceId = UUID.randomUUID().toString()
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String) {}
+                    override fun onDone(utteranceId: String) { tts?.shutdown() }
+                    @Deprecated("Deprecated in API 21")
+                    override fun onError(utteranceId: String) { tts?.shutdown() }
+                })
+                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            } else {
+                tts?.shutdown()
             }
         }
     }
