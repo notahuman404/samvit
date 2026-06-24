@@ -35,6 +35,11 @@ android {
         // Obtain a free key at https://console.picovoice.ai/
         val porcupineKey = project.findProperty("PORCUPINE_ACCESS_KEY")?.toString() ?: ""
         buildConfigField("String", "PORCUPINE_ACCESS_KEY", "\"$porcupineKey\"")
+
+        // Demo mode — scripted responses for filming without a live backend or Gemini key.
+        // Set DEMO_MODE=true in local.properties. Never set this in a production build.
+        val demoMode = project.findProperty("DEMO_MODE")?.toString()?.toBoolean() ?: false
+        buildConfigField("boolean", "DEMO_MODE", "$demoMode")
     }
 
     buildTypes {

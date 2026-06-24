@@ -10,6 +10,7 @@ import com.samvit.app.commands.GeminiIntentResolver
 import com.samvit.app.commands.ResolvedIntent
 import com.samvit.app.commands.StepResult
 import com.samvit.app.data.repository.SamvitRepository
+import com.samvit.app.demo.DemoScriptPlayer
 import com.samvit.app.emergency.EmergencyManager
 import com.samvit.app.reminder.ReminderScheduler
 import com.samvit.app.broadcast.TrustedContactBroadcast
@@ -202,6 +203,16 @@ class VoiceOrchestrator(private val context: Context) {
                 DeterministicCommand.NONE -> { /* fall through */ }
             }
 
+            // ── Demo mode — scripted responses (no Gemini key / backend required) ──
+            if (BuildConfig.DEMO_MODE) {
+                val script = DemoScriptPlayer.match(utterance)
+                if (script != null) {
+                    lastCommandId = repo.logCommand(utterance, script.action, "DEMO", _sessionId)
+                    runDemoScript(script)
+                    return@launch
+                }
+            }
+
             // ── Class 2 — AI intent resolution (fix 3: sessionId routes to backend) ─
             val memContext = repo.searchMemory(utterance.take(60))
                 .joinToString("\n") { "${it.key}: ${it.value}" }
@@ -333,6 +344,50 @@ class VoiceOrchestrator(private val context: Context) {
 
             step++
             stepResult = StepResult(success = true)
+        }
+    }
+
+    /**
+     * Demo mode — plays a [DemoScriptPlayer.DemoScript] step by step.
+     *
+     * Speaks the narration immediately, then each step in sequence, waiting for
+     * TTS to finish before advancing.  The user can interrupt with "Stop" at any
+     * point — the standard DeterministicMatcher handles that in the next
+     * utterance cycle so no special cancellation logic is needed here.
+     *
+     * Only called when BuildConfig.DEMO_MODE is true.
+     */
+    private suspend fun runDemoScript(script: DemoScriptPlayer.DemoScript) {
+        // Speak the opening narration and wait for it to finish.
+        awaitReply(script.narration)
+
+        for (step in script.steps) {
+            // Honour optional inter-step delay (simulates "thinking" time).
+            if (script.stepDelayMs > 0) delay(script.stepDelayMs)
+
+            // Speak this step and wait — each step is visually shown on screen
+            // so the camera can capture the reply text updating in real time.
+            awaitReply(step)
+        }
+    }
+
+    /**
+     * Speaks [text] via TTS and suspends until the utterance is fully complete.
+     * Uses the same CompletableDeferred pattern as [driveBackendPlan] so the
+     * existing onSpeakingDone chain is preserved correctly.
+     */
+    private suspend fun awaitReply(text: String) {
+        reply(text)
+        val done = CompletableDeferred<Unit>()
+        val prev = tts.onSpeakingDone
+        tts.onSpeakingDone = {
+            prev?.invoke()
+            done.complete(Unit)
+        }
+        try {
+            done.await()
+        } finally {
+            tts.onSpeakingDone = prev
         }
     }
 

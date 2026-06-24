@@ -19,3 +19,21 @@ USE_BACKEND_AGENT=false
 ## Obtain a free AccessKey at https://console.picovoice.ai/
 ## Also add your keyword model (samvit_android.ppn) to app/src/main/assets/
 PORCUPINE_ACCESS_KEY=
+
+## ── Demo / filming mode ─────────────────────────────────────────────────────
+## Set to true to enable scripted responses for filming a demo without a live
+## backend or Gemini API key.  The orb, state transitions, and UI behave exactly
+## as in production — only the AI call is replaced with a scripted sequence.
+##
+## NEVER ship a release build with DEMO_MODE=true.
+##
+## Commands recognised in demo mode (say naturally — matching is loose):
+##   "Find me a hospital near Gandhi Path, Jaipur"  → hospital search + results
+##   "Find and call the nearest clinic"             → clinic search + call
+##   "Open Chrome / search for / browse"            → multi-step narration (say
+##                                                    "Stop" to halt mid-flow)
+##   "What is / tell me about / explain"            → spoken web search result
+##
+## All other utterances (Stop, Emergency, Mayday) still work normally via the
+## DeterministicMatcher — no demo key required for those.
+DEMO_MODE=false
