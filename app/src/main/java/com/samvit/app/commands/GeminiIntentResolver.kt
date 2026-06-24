@@ -40,7 +40,7 @@ class GeminiIntentResolver(private val context: Context) {
 
     private val model by lazy {
         GenerativeModel(
-            modelName = "gemini-1.5-flash",
+            modelName = "gemini-2.5-flash",
             apiKey = BuildConfig.GEMINI_API_KEY
         )
     }

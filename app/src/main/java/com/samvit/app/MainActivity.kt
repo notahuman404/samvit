@@ -5,7 +5,6 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
@@ -18,6 +17,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import androidx.fragment.app.FragmentActivity
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -35,7 +35,7 @@ import kotlinx.coroutines.runBlocking
 private val android.content.Context.dataStore: DataStore<Preferences>
     by preferencesDataStore(name = "samvit_prefs")
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
 
