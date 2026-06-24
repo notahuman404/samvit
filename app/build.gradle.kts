@@ -82,6 +82,8 @@ dependencies {
     implementation(libs.generative.ai)
     implementation(libs.androidx.biometric)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.coroutines.play.services)
+    implementation(libs.okhttp)
     implementation(libs.accompanist.permissions)
 
     // Gap 2 — encryption at rest

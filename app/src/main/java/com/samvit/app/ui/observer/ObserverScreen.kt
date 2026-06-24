@@ -80,15 +80,7 @@ fun ObserverScreen(
             TabRow(
                 selectedTabIndex = selectedTab,
                 containerColor = SamvitSurface,
-                contentColor = SamvitAccent,
-                indicator = { tabPositions ->
-                    Box(
-                        Modifier
-                            .tabIndicatorOffset(tabPositions[selectedTab])
-                            .height(2.dp)
-                            .background(SamvitOrb)
-                    )
-                }
+                contentColor = SamvitAccent
             ) {
                 tabs.forEachIndexed { index, title ->
                     Tab(
@@ -415,6 +407,3 @@ private fun AddContactDialog(onDismiss: () -> Unit, onAdd: (String, String, Bool
         }
     )
 }
-
-@Composable
-private fun TabRowScope.tabIndicatorOffset(tabPosition: TabPosition) = this
