@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Looper
 import android.telephony.SmsManager
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.*
 import com.samvit.app.data.database.SamvitDatabase
@@ -33,6 +34,7 @@ class LocationBroadcastManager(private val context: Context) {
         /** How often to push a location SMS during an active emergency. */
         private const val INTERVAL_MS = 15_000L
         private const val FASTEST_INTERVAL_MS = 10_000L
+        private const val TAG = "LocationBroadcastManager"
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -97,7 +99,7 @@ class LocationBroadcastManager(private val context: Context) {
             try {
                 smsManager.sendTextMessage(contact.phone, null, message, null, null)
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "Failed to send location SMS to ${contact.phone}", e)
             }
         }
     }

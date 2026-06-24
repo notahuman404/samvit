@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.samvit.app.data.database.SamvitDatabase
 import com.samvit.app.voice.TTSManager
@@ -18,6 +19,10 @@ class TrustedContactBroadcast(
     private val context: Context,
     private val tts: TTSManager
 ) {
+    companion object {
+        private const val TAG = "TrustedContactBroadcast"
+    }
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val db = SamvitDatabase.getInstance(context)
 
@@ -59,7 +64,7 @@ class TrustedContactBroadcast(
         try {
             smsManager.sendTextMessage(phone, null, message, null, null)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Failed to send journey SMS to $phone", e)
         }
     }
 }

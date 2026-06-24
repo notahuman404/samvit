@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.net.Uri
 import android.telephony.SmsManager
+import android.util.Log
 import androidx.camera.camera2.Camera2Config
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -35,6 +36,10 @@ class EmergencyManager(
     private val context: Context,
     private val tts: TTSManager
 ) {
+    companion object {
+        private const val TAG = "EmergencyManager"
+    }
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val db = SamvitDatabase.getInstance(context)
     private var countdownJob: Job? = null
@@ -169,7 +174,7 @@ class EmergencyManager(
                     imageAnalysis
                 )
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "Failed to bind camera for forensics", e)
             }
         }, ContextCompat.getMainExecutor(context))
     }
@@ -210,7 +215,7 @@ class EmergencyManager(
                 sendSceneSms(description)
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Failed to send camera frame to backend", e)
         }
     }
 
@@ -229,7 +234,7 @@ class EmergencyManager(
             try {
                 smsManager.sendTextMessage(contact.phone, null, message, null, null)
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e(TAG, "Failed to send scene SMS to ${contact.phone}", e)
             }
         }
     }
@@ -254,7 +259,7 @@ class EmergencyManager(
         try {
             smsManager.sendTextMessage(phone, null, message, null, null)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Failed to send emergency SMS to $phone", e)
         }
     }
 
