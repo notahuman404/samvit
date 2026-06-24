@@ -303,15 +303,20 @@ class VoiceOrchestrator(private val context: Context) {
 
             if (action.narration.isNotBlank()) {
                 reply(action.narration)
-                // Wait for TTS to finish before continuing with the next step
+                // Wait for TTS to finish before continuing with the next step.
+                // Use try/finally so onSpeakingDone is always restored even if this
+                // coroutine is cancelled while suspended at ttsJob.await().
                 val ttsJob = CompletableDeferred<Unit>()
                 val originalOnDone = tts.onSpeakingDone
                 tts.onSpeakingDone = {
                     originalOnDone?.invoke()
                     ttsJob.complete(Unit)
                 }
-                ttsJob.await()
-                tts.onSpeakingDone = originalOnDone
+                try {
+                    ttsJob.await()
+                } finally {
+                    tts.onSpeakingDone = originalOnDone
+                }
             }
 
             if (action.requiresConfirmation) {
