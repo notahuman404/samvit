@@ -321,7 +321,11 @@ class VoiceOrchestrator(private val context: Context) {
         backendSessionId: String,
         // Report "nothing executed yet" so the backend returns the FIRST step's
         // action. Reporting success here makes advance_step skip step 0.
-        initialResult: StepResult = StepResult(success = false, screenDescription = "Plan starting; no action performed yet.")
+        initialResult: StepResult = StepResult(
+            success = false,
+            screenDescription = "Plan starting; no action performed yet.",
+            screenElementsJson = SamvitAccessibilityBridge.getInteractiveElementsJson()
+        )
     ) {
         if (!SamvitAccessibilityBridge.isServiceConnected) {
             reply("I need the accessibility service turned on to control the screen. Please enable Samvit in Accessibility settings.")
@@ -376,6 +380,7 @@ class VoiceOrchestrator(private val context: Context) {
         return StepResult(
             success = executed,
             screenDescription = SamvitAccessibilityBridge.getCurrentScreenText(),
+            screenElementsJson = SamvitAccessibilityBridge.getInteractiveElementsJson(),
             error = if (executed) "" else "Device could not perform ${action.action}"
         )
     }

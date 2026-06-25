@@ -8,6 +8,7 @@ import com.samvit.app.commands.ResolvedIntent
  */
 object SamvitAccessibilityBridge {
     var screenTextProvider: (() -> String)? = null
+    var elementsProvider: (() -> String)? = null
     var intentDispatcher: ((ResolvedIntent) -> Unit)? = null
 
     /** Executes a single backend-agent action on the device and returns success. */
@@ -16,6 +17,10 @@ object SamvitAccessibilityBridge {
     val isServiceConnected: Boolean get() = screenTextProvider != null
 
     fun getCurrentScreenText(): String = screenTextProvider?.invoke() ?: ""
+
+    /** JSON array of interactive on-screen nodes for backend element grounding. */
+    fun getInteractiveElementsJson(): String = elementsProvider?.invoke() ?: "[]"
+
     fun dispatchIntent(intent: ResolvedIntent) { intentDispatcher?.invoke(intent) }
 
     fun executeAgentAction(action: String, target: String, value: String, x: Int, y: Int): Boolean =
