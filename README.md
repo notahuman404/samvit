@@ -177,7 +177,7 @@ This isn't just accessibility software. It's **independence as a service.**
 - [Android Studio](https://developer.android.com/studio) (Ladybug or newer recommended)
 - Python 3.10+ (for backend)
 - A [Gemini API key](https://aistudio.google.com/apikey) (free tier works)
-- A `google-services.json` from your Firebase project (for Firebase AI SDK)
+- A `google-services.json` from your GenAI project (for GenAI AI SDK)
 
 ### Step 1 — Clone the repo
 
@@ -202,9 +202,9 @@ GEMINI_API_KEY=your_actual_gemini_api_key_here
 
 This key is used by both the Android app (via the Secrets Gradle Plugin) and the Python backend.
 
-### Step 3 — Firebase setup
+### Step 3 — GenAI setup
 
-Place your `google-services.json` file in the `app/` directory. You can get this from your [Firebase Console](https://console.firebase.google.com/) → Project Settings → General → Your Apps → Download `google-services.json`.
+Place your `google-services.json` file in the `app/` directory. You can get this from your [GenAI Console](https://console.firebase.google.com/) → Project Settings → General → Your Apps → Download `google-services.json`.
 
 ### Step 4 — Run the Android app
 
@@ -278,7 +278,7 @@ This runs the full 22-test HIL validation suite and outputs results to `hil_resu
 | Library | Purpose |
 |---|---|
 | [Jetpack Compose](https://developer.android.com/jetpack/compose) | Declarative UI framework |
-| [Firebase AI](https://firebase.google.com/docs/vertex-ai) | Gemini model access via Firebase |
+| [GenAI AI](https://firebase.google.com/docs/vertex-ai) | Gemini model access via GenAI |
 | [Retrofit](https://square.github.io/retrofit/) + [OkHttp](https://square.github.io/okhttp/) | HTTP client for backend communication |
 | [Moshi](https://github.com/square/moshi) | JSON serialization |
 | [CameraX](https://developer.android.com/training/camerax) | Camera capture pipeline |
