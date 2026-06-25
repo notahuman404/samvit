@@ -138,24 +138,57 @@ object BackendAgentClient {
                     Log.w(TAG, "nextAction → HTTP ${response.code}")
                     return@withContext null
                 }
-                val j = JSONObject(response.body?.string() ?: return@withContext null)
-                AgentActionResponse(
-                    action               = j.optString("action"),
-                    target               = j.optString("target"),
-                    value                = j.optString("value"),
-                    narration            = j.optString("narration"),
-                    x                   = j.optInt("x"),
-                    y                   = j.optInt("y"),
-                    confidence          = j.optDouble("confidence", 0.9).toFloat(),
-                    planStatus           = j.optString("planStatus", "running"),
-                    currentStep          = j.optInt("currentStep"),
-                    totalSteps           = j.optInt("totalSteps"),
-                    requiresConfirmation = j.optBoolean("requiresConfirmation"),
-                    confirmationMessage  = j.optString("confirmationMessage")
-                )
+                parseActionResponse(JSONObject(response.body?.string() ?: return@withContext null))
             } catch (e: Exception) {
                 Log.w(TAG, "nextAction failed: ${e.message}")
                 null
             }
         }
+
+    /**
+     * POST /agent/confirm — approve (or reject) a step the agent paused on, and
+     * receive the next action to perform.
+     *
+     * @return the next action, or null on any error.
+     */
+    suspend fun confirm(approved: Boolean, sessionId: String): AgentActionResponse? =
+        withContext(Dispatchers.IO) {
+            if (baseUrl.isBlank()) return@withContext null
+            try {
+                val body = JSONObject().put("approved", approved).toString()
+                    .toRequestBody("application/json".toMediaType())
+
+                val response = http.newCall(
+                    Request.Builder()
+                        .url("$baseUrl/agent/confirm")
+                        .post(body)
+                        .addHeader("X-Session-ID", sessionId)
+                        .build()
+                ).execute()
+
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "confirm → HTTP ${response.code}")
+                    return@withContext null
+                }
+                parseActionResponse(JSONObject(response.body?.string() ?: return@withContext null))
+            } catch (e: Exception) {
+                Log.w(TAG, "confirm failed: ${e.message}")
+                null
+            }
+        }
+
+    private fun parseActionResponse(j: JSONObject) = AgentActionResponse(
+        action               = j.optString("action"),
+        target               = j.optString("target"),
+        value                = j.optString("value"),
+        narration            = j.optString("narration"),
+        x                   = j.optInt("x"),
+        y                   = j.optInt("y"),
+        confidence          = j.optDouble("confidence", 0.9).toFloat(),
+        planStatus           = j.optString("planStatus", "executing"),
+        currentStep          = j.optInt("currentStep"),
+        totalSteps           = j.optInt("totalSteps"),
+        requiresConfirmation = j.optBoolean("requiresConfirmation"),
+        confirmationMessage  = j.optString("confirmationMessage")
+    )
 }
