@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.samvit.app.BuildConfig
 import com.samvit.app.accessibility.SamvitAccessibilityBridge
+import com.samvit.app.commands.AgentActionResponse
 import com.samvit.app.commands.BackendAgentClient
 import com.samvit.app.commands.DeterministicCommand
 import com.samvit.app.commands.DeterministicMatcher
@@ -282,6 +283,20 @@ class VoiceOrchestrator(private val context: Context) {
                 val backendSessionId = intent.params["sessionId"] ?: _sessionId
                 driveBackendPlan(backendSessionId)
             }
+            // Resume a backend plan the user just approved at a confirmation step.
+            "BACKEND_NEXT" -> {
+                val backendSessionId = intent.params["sessionId"] ?: _sessionId
+                val action = BackendAgentClient.confirm(approved = true, sessionId = backendSessionId)
+                if (action == null) {
+                    reply("I couldn't confirm that with the backend. Stopping here.")
+                } else {
+                    if (action.narration.isNotBlank()) awaitReply(action.narration)
+                    if (action.planStatus == "executing") {
+                        val result = performBackendAction(action)
+                        driveBackendPlan(backendSessionId, result)
+                    }
+                }
+            }
             "UNKNOWN" -> reply("I'm not sure what you'd like me to do. Could you try rephrasing?")
             else -> {
                 if (intent.narration.isNotBlank()) reply(intent.narration)
@@ -295,14 +310,29 @@ class VoiceOrchestrator(private val context: Context) {
      *
      * Each call to BackendAgentClient.nextAction() returns the next action and its
      * narration.  We speak the narration, dispatch the accessibility action, then
-     * report success to the backend for the next step.  Stops when planStatus is
-     * no longer "running", when requiresConfirmation is set, or after 20 steps max.
+     * report the real screen state to the backend for the next step.  Stops when
+     * planStatus is no longer "executing", when requiresConfirmation is set, or
+     * after 20 steps max.
      *
      * If the backend becomes unreachable mid-plan, the user hears a spoken error
      * and the loop exits cleanly — no silent failure.
      */
-    private suspend fun driveBackendPlan(backendSessionId: String) {
-        var stepResult = StepResult(success = true, screenDescription = "Plan started")
+    private suspend fun driveBackendPlan(
+        backendSessionId: String,
+        // Report "nothing executed yet" so the backend returns the FIRST step's
+        // action. Reporting success here makes advance_step skip step 0.
+        initialResult: StepResult = StepResult(
+            success = false,
+            screenDescription = "Plan starting; no action performed yet.",
+            screenElementsJson = SamvitAccessibilityBridge.getInteractiveElementsJson()
+        )
+    ) {
+        if (!SamvitAccessibilityBridge.isServiceConnected) {
+            reply("I need the accessibility service turned on to control the screen. Please enable Samvit in Accessibility settings.")
+            return
+        }
+
+        var stepResult = initialResult
         var step = 0
         val maxSteps = 20
 
@@ -310,27 +340,13 @@ class VoiceOrchestrator(private val context: Context) {
             val action = BackendAgentClient.nextAction(stepResult, backendSessionId)
             if (action == null) {
                 reply("I couldn't reach the backend for the next step. Stopping here.")
-                break
+                return
             }
 
-            if (action.narration.isNotBlank()) {
-                reply(action.narration)
-                // Wait for TTS to finish before continuing with the next step.
-                // Use try/finally so onSpeakingDone is always restored even if this
-                // coroutine is cancelled while suspended at ttsJob.await().
-                val ttsJob = CompletableDeferred<Unit>()
-                val originalOnDone = tts.onSpeakingDone
-                tts.onSpeakingDone = {
-                    originalOnDone?.invoke()
-                    ttsJob.complete(Unit)
-                }
-                try {
-                    ttsJob.await()
-                } finally {
-                    tts.onSpeakingDone = originalOnDone
-                }
-            }
+            // Speak this step and wait for TTS to finish before acting.
+            if (action.narration.isNotBlank()) awaitReply(action.narration)
 
+            // Pause for the user's permission on sensitive steps (resumed via BACKEND_NEXT).
             if (action.requiresConfirmation) {
                 pendingConfirmation = action.confirmationMessage
                 pendingIntent = ResolvedIntent(
@@ -338,14 +354,46 @@ class VoiceOrchestrator(private val context: Context) {
                     params    = mapOf("sessionId" to backendSessionId),
                     narration = action.narration
                 )
-                break
+                return
             }
 
-            if (action.planStatus != "running") break
+            // Keep driving only while the backend plan is still executing.
+            // Backend status vocabulary: executing | completed | failed | none.
+            if (action.planStatus != "executing") return
 
+            stepResult = performBackendAction(action)
             step++
-            stepResult = StepResult(success = true)
         }
+        reply("I've reached the step limit for this task, so I'll stop here.")
+    }
+
+    /**
+     * Dispatches one backend action to the accessibility service, waits for the
+     * screen to settle, then reads the new screen state back so the backend can
+     * decide the next step.
+     */
+    private suspend fun performBackendAction(action: AgentActionResponse): StepResult {
+        val executed = SamvitAccessibilityBridge.executeAgentAction(
+            action.action, action.target, action.value, action.x, action.y
+        )
+        delay(settleDelayFor(action.action))
+        return StepResult(
+            success = executed,
+            screenDescription = SamvitAccessibilityBridge.getCurrentScreenText(),
+            screenElementsJson = SamvitAccessibilityBridge.getInteractiveElementsJson(),
+            error = if (executed) "" else "Device could not perform ${action.action}"
+        )
+    }
+
+    /** How long to wait for the screen to settle after an action before reading it. */
+    private fun settleDelayFor(action: String): Long = when (action.lowercase()) {
+        "open_app" -> 1500L
+        "wait" -> 1000L
+        "tap", "long_press" -> 900L
+        "press_back", "press_home",
+        "scroll_down", "scroll_up", "swipe_left", "swipe_right" -> 700L
+        "type_text" -> 500L
+        else -> 800L
     }
 
     /**
