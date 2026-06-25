@@ -320,7 +320,3 @@ The hardware simulation (`hardware/tests/hil_simulation.py`) uses noise models a
 ## 📄 License
 
 MIT License — Open for contribution and community development.
-
----
-
-*Built for the Undergraduate Track — AI for Life & Work | Brief 4: Public Service*
