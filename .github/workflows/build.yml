@@ -1,24 +1,39 @@
-name: Build APK
+name: Android CI
 
-on: [push]
+on: [push, pull_request]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v5
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+        working-directory: ./app
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug
+        working-directory: ./app
+        env:
+          # Provide dummy values for CI build, or set as GitHub Secrets
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY || 'dummy_gemini_key' }}
+          BACKEND_URL: ${{ secrets.BACKEND_URL || 'http://localhost:8000' }}
+          USE_BACKEND_AGENT: ${{ secrets.USE_BACKEND_AGENT || 'false' }}
+          PORCUPINE_ACCESS_KEY: ${{ secrets.PORCUPINE_ACCESS_KEY || 'dummy_porcupine_key' }}
+          DEMO_MODE: ${{ secrets.DEMO_MODE || 'true' }}
 
       - name: Upload APK
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: samvit-debug
           path: app/build/outputs/apk/debug/app-debug.apk
